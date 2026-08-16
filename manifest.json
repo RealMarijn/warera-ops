@@ -1,0 +1,29 @@
+{
+  "manifest_version": 2,
+  "name": "WarEra Ops",
+  "version": "0.1.0",
+  "description": "Adds extra API-powered stats (like Bounty rank) to WarEra profile pages.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "warera-ops@local.extension"
+    }
+  },
+  "permissions": [
+    "storage",
+    "https://api2.warera.io/*",
+    "https://api3.warera.io/*",
+    "https://api4.warera.io/*",
+    "https://api5.warera.io/*",
+    "https://api6.warera.io/*"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://app.warera.io/*"],
+      "js": ["common.js", "rankings.js", "country-rankings.js", "mu-rankings.js", "inventory-export.js", "battle-money-totals.js", "market-order-totals.js", "account-inventory-value.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
