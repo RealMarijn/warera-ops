@@ -1,6 +1,8 @@
+<img src="icons/icon128.png" width="96" height="96" alt="WarEra Ops icon">
+
 # WarEra Ops
 
-A Firefox extension that adds extra stats to the [WarEra](https://app.warera.io) browser game, pulled from WarEra's own public API and styled to match the game's own UI.
+A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats to the [WarEra](https://app.warera.io) browser game, pulled from WarEra's own public API and styled to match the game's own UI.
 
 ## Features
 

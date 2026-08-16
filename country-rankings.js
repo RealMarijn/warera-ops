@@ -202,7 +202,7 @@
 
     try {
       const raw = await browser.runtime.sendMessage({
-        type: "WARERA_INTEL_FETCH",
+        type: "WARERA_OPS_FETCH",
         endpoint: "country.getCountryById",
         params: { countryId },
       });
