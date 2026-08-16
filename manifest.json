@@ -31,6 +31,9 @@
     "https://api5.warera.io/*",
     "https://api6.warera.io/*"
   ],
+  "action": {
+    "default_popup": "menu.html"
+  },
   "background": {
     "service_worker": "background.js",
     "scripts": ["background.js"]
@@ -40,6 +43,18 @@
       "matches": ["https://app.warera.io/*"],
       "js": ["browser-polyfill.js", "common.js", "rankings.js", "country-rankings.js", "mu-rankings.js", "inventory-export.js", "battle-money-totals.js", "market-order-totals.js", "account-inventory-value.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://app.warera.io/*"],
+      "js": ["tools/dmg-lines/hook.js", "tools/dmg-lines/map.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://app.warera.io/*"],
+      "js": ["tools/dmg-lines/overlay.js"],
+      "run_at": "document_start",
+      "world": "ISOLATED"
     }
   ]
 }
