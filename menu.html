@@ -3,15 +3,18 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>WarEra Damage lines</title>
+    <title>WarEra Ops</title>
     <style>
       body { width: 240px; margin: 0; font-family: system-ui, sans-serif; background: #14161c; color: #e8e8ea; }
       .wrap { padding: 14px; }
       h1 { font-size: 14px; margin: 0 0 2px; }
       p { font-size: 11px; opacity: .65; margin: 0 0 12px; line-height: 1.4; }
-      .row { display: flex; align-items: center; justify-content: space-between; }
-      .row span { font-size: 13px; }
-      .switch { position: relative; width: 42px; height: 24px; }
+      .row { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; }
+      .row + .row { border-top: 1px solid rgba(255,255,255,.07); }
+      .row .label { display: flex; flex-direction: column; gap: 2px; }
+      .row .label span { font-size: 13px; }
+      .row .label small { font-size: 10px; opacity: .55; }
+      .switch { position: relative; width: 42px; height: 24px; flex: none; }
       .switch input { opacity: 0; width: 0; height: 0; }
       .slider { position: absolute; inset: 0; background: #3a3d47; border-radius: 24px;
         cursor: pointer; transition: .15s; }
@@ -24,16 +27,29 @@
   </head>
   <body>
     <div class="wrap">
-      <h1>WarEra Damage lines</h1>
-      <p>Real-time damage-flow lines for the battle you have open.</p>
+      <h1>WarEra Ops</h1>
+      <p>Extra stats and live battle overlays for WarEra.</p>
       <div class="row">
-        <span>Show overlay</span>
+        <span class="label">
+          <span>Extra stats</span>
+          <small>Profile, country, MU, market &amp; battle stats.</small>
+        </span>
         <label class="switch">
-          <input type="checkbox" id="toggle" checked />
+          <input type="checkbox" id="toggle-stats" checked />
           <span class="slider"></span>
         </label>
       </div>
-      <div class="hint">Open a battle on app.warera.io to see the lines.</div>
+      <div class="row">
+        <span class="label">
+          <span>Damage lines</span>
+          <small>Real-time damage-flow lines on the battle map.</small>
+        </span>
+        <label class="switch">
+          <input type="checkbox" id="toggle-dmg" checked />
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="hint">Open app.warera.io to see the effect.</div>
     </div>
     <script src="menu.js"></script>
   </body>
