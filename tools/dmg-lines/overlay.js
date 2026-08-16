@@ -8,8 +8,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlPanel = "0.4.0"; } catch (_) {}
-  console.log("[WDL] overlay.js panel v0.4.0 loaded");
+  try { document.documentElement.dataset.wdlPanel = "0.5.0"; } catch (_) {}
+  console.log("[WDL] overlay.js panel v0.5.0 loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const FLAG = (code) => `https://media.warera.io/images/flags/${code}.svg?v=16`;
@@ -48,6 +48,9 @@
     .row .amt { font-weight:700; font-variant-numeric: tabular-nums; }
     .row .rate { opacity:.6; font-size:10px; margin-left:2px; }
     .bar { height:3px; border-radius:2px; margin-top:2px; }
+    .totals { padding-bottom:8px; margin-bottom:8px; border-bottom:1px solid rgba(255,255,255,.08); }
+    .totals .row .nm { font-weight:700; }
+    .totals .row .swatch { width:9px; height:9px; border-radius:2px; flex:none; }
   `;
 
   const build = () => {
@@ -97,9 +100,22 @@
         <div class="bar" style="width:${Math.max(2, (c.total / max) * 100)}%;background:${color}"></div>
       </div>`;
     }).join("");
+    const t = summary.totals || {};
+    const totals = `<div class="totals">
+        <div class="row">
+          <i class="swatch" style="background:${ATT}"></i>
+          <span class="nm">All attackers</span>
+          <span class="amt" style="color:${ATT}">${fmt(t.attackerRate || 0)}/min</span>
+        </div>
+        <div class="row">
+          <i class="swatch" style="background:${DEF}"></i>
+          <span class="nm">All defenders</span>
+          <span class="amt" style="color:${DEF}">${fmt(t.defenderRate || 0)}/min</span>
+        </div>
+      </div>`;
     els.body.innerHTML =
-      `<div class="legend"><span><i style="background:${ATT}"></i>Attacker side</span>
-        <span><i style="background:${DEF}"></i>Defender side</span></div>${rows}`;
+      `<div class="legend"><span><i style="background:${DEF}"></i>Defender side</span>
+        <span><i style="background:${ATT}"></i>Attacker side</span></div>${totals}${rows}`;
   };
 
   // ---- wiring -----------------------------------------------------------

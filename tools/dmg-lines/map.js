@@ -16,8 +16,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlEngine = "0.4.0"; } catch (_) {}
-  console.log("[WDL] map.js engine v0.4.0 (tapered lines) loaded");
+  try { document.documentElement.dataset.wdlEngine = "0.5.0"; } catch (_) {}
+  console.log("[WDL] map.js engine v0.5.0 (tapered lines) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const NS = "http://www.w3.org/2000/svg";
@@ -248,12 +248,18 @@
     const now = Date.now();
     const tp = map.project(target);
 
-    // rank contributing countries by current rate
+    // rank contributing countries by current rate; also sum rates per side across
+    // ALL contributing countries (not just the ones with a resolved map position)
+    // so the attacker/defender totals aren't capped by MAX_LINES or missing positions.
     const rows = [];
+    const totals = { attackerRate: 0, defenderRate: 0, attackerTotal: 0, defenderTotal: 0 };
     for (const [cid, c] of b.countries) {
+      const rate = rateOf(c.events, now);
+      if (c.side === "attacker") { totals.attackerRate += rate; totals.attackerTotal += c.total; }
+      else { totals.defenderRate += rate; totals.defenderTotal += c.total; }
       const pos = countryPos[cid];
       if (!pos) continue;
-      rows.push({ cid, side: c.side, total: c.total, rate: rateOf(c.events, now), pos });
+      rows.push({ cid, side: c.side, total: c.total, rate, pos });
     }
     rows.sort((a, b2) => b2.rate - a.rate || b2.total - a.total);
     const shown = rows.slice(0, MAX_LINES);
@@ -294,12 +300,13 @@
       if (!live.has(cid)) { e.path.remove(); e.grad.remove(); arcEls.delete(cid); }
     }
 
-    if (doPost) postSummary(shown, now);
+    if (doPost) postSummary(shown, totals);
   };
 
-  const postSummary = (rows, now) => {
+  const postSummary = (rows, totals) => {
     window.postMessage({
       __wdl: CHANNEL, kind: "summary", active: true,
+      totals,
       countries: rows.map((r) => ({
         code: (countryMeta[r.cid] || {}).code || "",
         name: (countryMeta[r.cid] || {}).name || "?",
