@@ -54,7 +54,7 @@
   async function fetchItemOrders(itemCode) {
     try {
       const raw = await browser.runtime.sendMessage({
-        type: "WARERA_INTEL_FETCH",
+        type: "WARERA_OPS_FETCH",
         endpoint: "tradingOrder.getTopOrders",
         params: { itemCode, limit: 100 },
       });
@@ -72,7 +72,7 @@
   async function fetchMarketPrices() {
     try {
       const raw = await browser.runtime.sendMessage({
-        type: "WARERA_INTEL_FETCH",
+        type: "WARERA_OPS_FETCH",
         endpoint: "itemTrading.getPrices",
         params: {},
       });

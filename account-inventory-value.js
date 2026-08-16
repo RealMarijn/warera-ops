@@ -69,7 +69,7 @@
   async function fetchPrices() {
     try {
       const raw = await browser.runtime.sendMessage({
-        type: "WARERA_INTEL_FETCH",
+        type: "WARERA_OPS_FETCH",
         endpoint: "itemTrading.getPrices",
         params: {},
       });

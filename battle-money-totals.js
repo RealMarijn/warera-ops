@@ -115,7 +115,7 @@
         const params = { battleId, dataType: "money", type, side };
         if (cursor) params.cursor = cursor;
         const raw = await browser.runtime.sendMessage({
-          type: "WARERA_INTEL_FETCH",
+          type: "WARERA_OPS_FETCH",
           endpoint: "battleRanking.getRanking",
           params,
         });
