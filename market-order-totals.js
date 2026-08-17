@@ -189,6 +189,9 @@
     if (tooltipEl) return;
     const style = document.createElement("style");
     style.id = "warera-ops-market-tooltip-style";
+    // Styling mirrors WarEra's own elevated surfaces (Saira font, dark slate panel bg, the game's
+    // signature layered near-black ring + soft shadow) so it sits in line with the game UI —
+    // matches the tooltip in rankings.js.
     style.textContent = `
       #warera-ops-market-tooltip {
         position: fixed;
@@ -196,22 +199,21 @@
         display: none;
         min-width: 180px;
         padding: 10px 12px;
-        background: linear-gradient(180deg, #29323c 0%, #1c232b 100%);
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        border-radius: 8px;
-        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
-        font-family: "Texturina", Georgia, serif;
-        color: #e5e9ee;
+        background: rgba(21, 26, 30, 0.96);
+        border-radius: 9px;
+        box-shadow: 0 0 0 1px #0b0d0f, 0 1px 0 1px #0b0d0f, 2px 2px 14px rgba(0, 0, 0, 0.55);
+        font-family: "Saira", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #d2dadf;
         pointer-events: none;
       }
       #warera-ops-market-tooltip .wi-mtt-title {
         font-size: 11px;
         text-transform: uppercase;
-        letter-spacing: 0.05em;
-        opacity: 0.7;
+        letter-spacing: 0.06em;
+        color: #a0a7b4;
         margin-bottom: 6px;
         padding-bottom: 6px;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
       }
       #warera-ops-market-tooltip .wi-mtt-col-label {
         font-size: 11px;

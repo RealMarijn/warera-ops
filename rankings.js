@@ -96,6 +96,10 @@
 
     const style = document.createElement("style");
     style.id = "warera-ops-tooltip-style";
+    // Styling mirrors WarEra's own elevated surfaces (read off the live app): Saira UI font,
+    // dark slate panel bg, and the game's signature layered shadow — a crisp near-black 1px ring
+    // plus a soft drop shadow — rather than a custom gradient + white border + serif font, which
+    // looked out of place next to the game's UI.
     style.textContent = `
       #warera-ops-tooltip {
         position: fixed;
@@ -103,22 +107,21 @@
         display: none;
         min-width: 170px;
         padding: 10px 12px;
-        background: linear-gradient(180deg, #29323c 0%, #1c232b 100%);
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        border-radius: 8px;
-        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
-        font-family: "Texturina", Georgia, serif;
-        color: #e5e9ee;
+        background: rgba(21, 26, 30, 0.96);
+        border-radius: 9px;
+        box-shadow: 0 0 0 1px #0b0d0f, 0 1px 0 1px #0b0d0f, 2px 2px 14px rgba(0, 0, 0, 0.55);
+        font-family: "Saira", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #d2dadf;
         pointer-events: none;
       }
       #warera-ops-tooltip .wi-tt-title {
         font-size: 11px;
         text-transform: uppercase;
-        letter-spacing: 0.05em;
-        opacity: 0.7;
+        letter-spacing: 0.06em;
+        color: #a0a7b4;
         margin-bottom: 6px;
         padding-bottom: 6px;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
       }
       #warera-ops-tooltip .wi-tt-row {
         display: flex;
