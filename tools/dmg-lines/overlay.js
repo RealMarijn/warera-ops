@@ -22,8 +22,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlPanel = "1.3.0"; } catch (_) {}
-  console.log("[WDL] overlay.js panel v1.3.0 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlPanel = "1.3.1"; } catch (_) {}
+  console.log("[WDL] overlay.js panel v1.3.1 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const FLAG = (code) => `https://media.warera.io/images/flags/${code}.svg?v=16`;
@@ -36,6 +36,7 @@
   };
   const MARGIN = 4;
   const GAP = 12; // px between linked panels when laid out side by side
+  const MIN_REVEAL = 220; // px the panel grows by, at minimum, whenever it's uncollapsed
 
   const fmt = (n) => {
     if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
@@ -315,18 +316,25 @@
     // reveals the supporting-countries breakdown and the height-resize handle; the same button
     // (positioned right under the region) flips between "show"/"hide" in place.
     const setUncollapsed = (on) => {
-      els.body.style.display = on ? "" : "none";
-      els.hrsz.style.display = on ? "" : "none";
-      els.uncollapseBtn.textContent = on ? "▴ Hide supporting countries" : "▾ Show supporting countries";
       if (on) {
-        // Reapply the last known custom height, if any — otherwise leave height unset so the
-        // panel auto-sizes to fit its (now-visible) content.
-        if (customHeight) els.panel.style.height = customHeight;
+        // Grow DOWN from however tall the collapsed panel currently is, by at least MIN_REVEAL —
+        // never just reapply a remembered custom height as-is: if that height was recorded while
+        // shrinking the resize handle way up (dragged close to the collapsed height, or smaller),
+        // reapplying it verbatim barely reveals anything. Whichever is taller wins, so a
+        // deliberately-set larger custom height is still respected.
+        const collapsedHeight = els.panel.getBoundingClientRect().height;
+        const customPx = customHeight ? parseFloat(customHeight) : 0;
+        els.panel.style.height = Math.max(collapsedHeight + MIN_REVEAL, customPx) + "px";
+        els.body.style.display = "";
+        els.hrsz.style.display = "";
       } else {
+        els.body.style.display = "none";
+        els.hrsz.style.display = "none";
         // Collapsing always reverts to auto height — otherwise the panel would keep whatever
         // tall height it had while uncollapsed, leaving an empty gap below the collapsed content.
         els.panel.style.height = "";
       }
+      els.uncollapseBtn.textContent = on ? "▴ Hide supporting countries" : "▾ Show supporting countries";
     };
 
     // ---- picker: open / filter / choose ----------------------------------
