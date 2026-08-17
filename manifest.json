@@ -29,7 +29,8 @@
     "https://api3.warera.io/*",
     "https://api4.warera.io/*",
     "https://api5.warera.io/*",
-    "https://api6.warera.io/*"
+    "https://api6.warera.io/*",
+    "https://warera.realmarijn.nl/*"
   ],
   "action": {
     "default_popup": "menu.html"
@@ -41,7 +42,7 @@
   "content_scripts": [
     {
       "matches": ["https://app.warera.io/*"],
-      "js": ["browser-polyfill.js", "common.js", "rankings.js", "country-rankings.js", "mu-rankings.js", "inventory-export.js", "battle-money-totals.js", "market-order-totals.js", "account-inventory-value.js"],
+      "js": ["browser-polyfill.js", "common.js", "rankings.js", "country-rankings.js", "mu-rankings.js", "inventory-export.js", "battle-money-totals.js", "account-inventory-value.js"],
       "run_at": "document_idle"
     },
     {
