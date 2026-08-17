@@ -11,8 +11,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlPanel = "0.9.0"; } catch (_) {}
-  console.log("[WDL] overlay.js panel v0.9.0 loaded");
+  try { document.documentElement.dataset.wdlPanel = "0.9.1"; } catch (_) {}
+  console.log("[WDL] overlay.js panel v0.9.1 loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const FLAG = (code) => `https://media.warera.io/images/flags/${code}.svg?v=16`;
@@ -388,28 +388,50 @@
     relayConfig();
     if (on) {
       render(lastSummary);
+      clampPanel(); // a saved position / smaller window mustn't leave it off-screen
       if (!listRequested) requestBattleList();
     } else {
       closePicker();
     }
   };
 
+  // Keep the whole panel within the viewport (with a small margin). Only repositions when it's
+  // actually out of bounds, so it doesn't disturb the default bottom-left anchoring.
+  const MARGIN = 4;
+  const clampPanel = () => {
+    if (!els || !els.panel || !host || host.style.display === "none") return;
+    const p = els.panel;
+    const r = p.getBoundingClientRect();
+    if (!r.width) return;
+    const maxLeft = Math.max(MARGIN, window.innerWidth - r.width - MARGIN);
+    const maxTop = Math.max(MARGIN, window.innerHeight - r.height - MARGIN);
+    const left = Math.min(Math.max(MARGIN, r.left), maxLeft);
+    const top = Math.min(Math.max(MARGIN, r.top), maxTop);
+    if (Math.round(left) !== Math.round(r.left) || Math.round(top) !== Math.round(r.top)) {
+      p.style.left = left + "px"; p.style.top = top + "px";
+      p.style.right = "auto"; p.style.bottom = "auto";
+    }
+  };
+
   // Bottom-right grip resizes width + height. Switches the panel to top/left anchoring on grab
   // (it defaults to bottom/left) so dragging the grip down-right grows the panel down-right.
+  // Growth is capped so the panel can't extend past the right/bottom edge of the screen.
   function makeResizable(panel, handle) {
-    let sx, sy, sw, sh, resizing = false;
+    let sx, sy, sw, sh, ol, ot, resizing = false;
     handle.addEventListener("mousedown", (e) => {
       resizing = true;
       const r = panel.getBoundingClientRect();
-      sw = r.width; sh = r.height; sx = e.clientX; sy = e.clientY;
+      sw = r.width; sh = r.height; sx = e.clientX; sy = e.clientY; ol = r.left; ot = r.top;
       panel.style.left = r.left + "px"; panel.style.top = r.top + "px";
       panel.style.right = "auto"; panel.style.bottom = "auto";
       e.preventDefault(); e.stopPropagation();
     });
     window.addEventListener("mousemove", (e) => {
       if (!resizing) return;
-      panel.style.width = Math.max(280, sw + (e.clientX - sx)) + "px";
-      panel.style.height = Math.max(160, sh + (e.clientY - sy)) + "px";
+      const maxW = Math.max(280, window.innerWidth - ol - MARGIN);
+      const maxH = Math.max(160, window.innerHeight - ot - MARGIN);
+      panel.style.width = Math.max(280, Math.min(sw + (e.clientX - sx), maxW)) + "px";
+      panel.style.height = Math.max(160, Math.min(sh + (e.clientY - sy), maxH)) + "px";
     });
     window.addEventListener("mouseup", () => {
       if (!resizing) return;
@@ -432,8 +454,10 @@
     });
     window.addEventListener("mousemove", (e) => {
       if (!dragging) return;
-      panel.style.left = ox + (e.clientX - sx) + "px";
-      panel.style.top = oy + (e.clientY - sy) + "px";
+      const w = panel.offsetWidth, h = panel.offsetHeight;
+      const left = Math.min(Math.max(MARGIN, ox + (e.clientX - sx)), Math.max(MARGIN, window.innerWidth - w - MARGIN));
+      const top = Math.min(Math.max(MARGIN, oy + (e.clientY - sy)), Math.max(MARGIN, window.innerHeight - h - MARGIN));
+      panel.style.left = left + "px"; panel.style.top = top + "px";
       panel.style.right = "auto"; panel.style.bottom = "auto";
     });
     window.addEventListener("mouseup", () => {
@@ -441,6 +465,8 @@
       dragging = false;
       try { chrome.storage?.local.set({ wdlPos: { left: panel.style.left, top: panel.style.top } }); } catch (_) {}
     });
+    // Re-clamp on viewport resize so a shrinking window can't leave the panel off-screen.
+    window.addEventListener("resize", clampPanel);
   }
 
   function restore(panel) {

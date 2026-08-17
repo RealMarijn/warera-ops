@@ -24,8 +24,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlEngine = "0.7.0"; } catch (_) {}
-  console.log("[WDL] map.js engine v0.7.0 (origin nodes + clearer lines) loaded");
+  try { document.documentElement.dataset.wdlEngine = "0.7.1"; } catch (_) {}
+  console.log("[WDL] map.js engine v0.7.1 (lines layered inside the map) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const NS = "http://www.w3.org/2000/svg";
@@ -243,9 +243,12 @@
     if (svg) return;
     svg = document.createElementNS(NS, "svg");
     svg.id = "wdl-map-lines";
+    // Positioned to fill the MapLibre container (see append below): absolute + inset 0 overlays
+    // the canvas exactly, and a low z-index keeps the lines just above the map but below the app's
+    // UI (cards, menus) which live outside the map at higher z-indexes.
     Object.assign(svg.style, {
-      position: "fixed", inset: "0", width: "100vw", height: "100vh",
-      pointerEvents: "none", zIndex: "9998",
+      position: "absolute", inset: "0", width: "100%", height: "100%",
+      pointerEvents: "none", zIndex: "1",
     });
     defsEl = document.createElementNS(NS, "defs");
     svg.appendChild(defsEl);
@@ -259,7 +262,11 @@
     svg.appendChild(gArcs);
     gNodes = document.createElementNS(NS, "g"); // origin markers, painted above all ribbons
     svg.appendChild(gNodes);
-    document.body.appendChild(svg);
+    // Inject INTO the map container so the lines share the map's stacking context and fall behind
+    // the app UI. Fall back to a fixed full-viewport overlay only if the container is unavailable.
+    const container = (map && typeof map.getContainer === "function" && map.getContainer()) || document.body;
+    if (container === document.body) { svg.style.position = "fixed"; svg.style.zIndex = "9998"; }
+    container.appendChild(svg);
   };
 
   const rateOf = (events, now) => {
