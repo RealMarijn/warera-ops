@@ -4,37 +4,51 @@
 // EACH contributing player-country to the contested region, thickness ∝ that
 // country's live damage rate, coloured by side (attacker = red, defender = blue).
 //
-// Runs in the MAIN world because it needs (a) the page's MapLibre Map instance
-// and (b) same-origin tRPC calls with the game's auth cookies. Data in:
-//   hook.js -> {kind:"lasthit", battleId, side, user, damages}   (per hit)
-//   overlay.js -> {kind:"config", enabled}
+// Runs in the MAIN world because it needs (a) the page's MapLibre Map instance,
+// (b) same-origin tRPC calls with the game's auth cookies, and (c) to open its OWN
+// Centrifugo WebSocket (so it can subscribe to a battle the user picked in the
+// overlay, even without that battle page open). Data in:
+//   hook.js  -> {kind:"lasthit", battleId, side, user, damages}   (game tap, per hit)
+//   overlay  -> {kind:"config", enabled}
+//   overlay  -> {kind:"selectBattle", battleId}      (pick/clear a battle to watch)
+//   overlay  -> {kind:"requestBattleList"}           (populate the picker)
 // Data out:
-//   -> {kind:"summary", ...}   for the overlay panel
+//   -> {kind:"summary", ..., header}   per-country totals + "Region · A vs D" header
+//   -> {kind:"battleList", battles}    active battles for the picker
 //
-// Pipeline: lasthit -> resolve user's country (cached) -> aggregate per country
-// -> project country centroid + region centroid -> draw/update arcs.
+// Pipeline: lasthit -> resolve user's country (cached) -> aggregate per country ->
+// project country + region centroid -> draw/update arcs. The lines track ONLY the
+// battle the user picks in the overlay, fed by our own subscription (tagged "self").
+// The game tap (hook.js, fired by opening a battle page) is received but ignored on
+// purpose — nothing is drawn until a battle is selected in the picker.
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlEngine = "0.5.0"; } catch (_) {}
-  console.log("[WDL] map.js engine v0.5.0 (tapered lines) loaded");
+  try { document.documentElement.dataset.wdlEngine = "0.7.1"; } catch (_) {}
+  console.log("[WDL] map.js engine v0.7.1 (lines layered inside the map) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const NS = "http://www.w3.org/2000/svg";
   const RATE_WINDOW_MS = 60_000;   // sliding window for "damage/min"
   const MAX_LINES = 14;            // cap arcs to avoid clutter
   const ATT = "#ff5a5a", DEF = "#5aa9ff";
+  const WS_URL = "wss://ws.warera.io/connection/websocket"; // WarEra's Centrifugo endpoint
 
   let map = null;
   let regionPos = {};   // regionId  -> [lng,lat]
+  let regionMeta = {};  // regionId  -> { name }
   let countryPos = {};  // countryId -> [lng,lat] (homeland centroid)
   let countryMeta = {}; // countryId -> { code, name }
   let ready = false;
   let enabled = true;
 
-  // battleId -> { region, meta, countries: Map<countryId,{side,total,events:[{t,dmg}]}> }
+  // battleId -> { region, meta, header, countries: Map<countryId,{side,total,events:[{t,dmg}]}> }
   const battles = new Map();
   let activeBattleId = null;
+  // Battle chosen in the overlay's picker. When set, it takes priority over whatever battle
+  // the game itself is spectating, and we feed it from OUR OWN Centrifugo subscription (below)
+  // instead of hook.js's passive tap — so it works even without the battle page open.
+  let manualBattleId = null;
 
   const userCountry = new Map();     // userId -> countryId | null (null = resolving)
   const pendingByUser = new Map();   // userId -> [{battleId, side, dmg, t}]
@@ -56,6 +70,19 @@
     const j = await r.json();
     const d = j[0].result.data;
     return d.json || d;
+  };
+  // POST variant for tRPC mutations (the centrifugo.* token endpoints are mutations, so a GET
+  // returns 405). Same non-superjson input shape as trpcRaw.
+  const trpcMutate = async (proc, input) => {
+    const r = await fetch("https://api2.warera.io/trpc/" + proc + "?batch=1", {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ 0: input }),
+    });
+    if (!r.ok) throw new Error(proc + " " + r.status);
+    const j = await r.json();
+    return j[0].result.data;
   };
 
   // ---- find MapLibre Map via React fiber --------------------------------
@@ -116,20 +143,42 @@
     const list = await trpcNull("country.getAllCountries");
     const arr = Array.isArray(list) ? list : Object.values(list);
     for (const c of arr) if (c && c._id) countryMeta[c._id] = { code: c.code, name: c.name };
+
+    // Region names (for the overlay's battle header) — keyed regionId -> { name }.
+    // Best-effort: a failure here just leaves headers without a region name.
+    try {
+      const regions = await trpcRaw("region.getRegionsObject", {});
+      const robj = (regions && regions.json) || regions || {};
+      regionMeta = {};
+      for (const id in robj) if (robj[id] && robj[id].name) regionMeta[id] = { name: robj[id].name };
+    } catch (_) { /* keep whatever we had */ }
     return true;
   };
 
   // ---- battle metadata (region + sides) ---------------------------------
+  const countryLabel = (cid) => {
+    const m = countryMeta[cid];
+    return { name: (m && m.name) || "?", code: (m && m.code) || "" };
+  };
+
   const ensureBattle = (battleId) => {
     let b = battles.get(battleId);
     if (!b) {
-      b = { region: null, meta: false, countries: new Map() };
+      b = { region: null, meta: false, header: null, countries: new Map() };
       battles.set(battleId, b);
     }
     if (!b.meta) {
       b.meta = true; // guard against duplicate fetches
       trpcRaw("battle.getById", { battleId })
-        .then((d) => { b.region = d && d.defender && d.defender.region; })
+        .then((d) => {
+          b.region = d && d.defender && d.defender.region;
+          // Header shown in the overlay: contested region + attacker vs defender country.
+          b.header = {
+            regionName: (b.region && regionMeta[b.region] && regionMeta[b.region].name) || null,
+            attacker: countryLabel(d && d.attacker && d.attacker.country),
+            defender: countryLabel(d && d.defender && d.defender.country),
+          };
+        })
         .catch(() => { b.meta = false; });
     }
     return b;
@@ -157,9 +206,13 @@
       .catch(() => { userCountry.delete(userId); pendingByUser.delete(userId); });
   };
 
-  const onLastHit = (m) => {
+  const onLastHit = (m, source) => {
     if (!m.user) return;
-    activeBattleId = m.battleId;
+    // Manual-only: the damage lines track ONLY the battle picked in the overlay, fed by our own
+    // Centrifugo subscription ("self"). Opening a battle page (the game tap) is ignored on purpose.
+    if (!manualBattleId || m.battleId !== manualBattleId || source !== "self") return;
+
+    activeBattleId = manualBattleId;
     ensureBattle(m.battleId);
     const t = Date.now();
     const cid = userCountry.get(m.user);
@@ -178,26 +231,42 @@
 
   // ---- rendering --------------------------------------------------------
   // Each line is a tapered "ribbon" (a filled polygon that follows a quadratic
-  // curve) rather than a plain stroke — a stroke can't vary its width. It starts
-  // near-zero width at the source country and widens toward the region, filled
-  // with a linear gradient that fades from near-transparent (source) to bright
-  // (region), so the flow reads as "into" the contested region.
-  let svg, gArcs, defsEl;
-  const arcEls = new Map(); // countryId -> { path, grad, s0, s1 }
+  // curve) rather than a plain stroke — a stroke can't vary its width. It has a
+  // visible width at the SOURCE country and widens toward the region, filled with
+  // a linear gradient that stays clearly visible at the source and brightens toward
+  // the region, so the flow reads as "into" the contested region. A glowing origin
+  // node (halo + core, sized by damage rate) marks exactly where each line starts.
+  let svg, gArcs, gNodes, defsEl;
+  const arcEls = new Map(); // countryId -> { path, grad, s0, s1, halo, core }
 
   const ensureSvg = () => {
     if (svg) return;
     svg = document.createElementNS(NS, "svg");
     svg.id = "wdl-map-lines";
+    // Positioned to fill the MapLibre container (see append below): absolute + inset 0 overlays
+    // the canvas exactly, and a low z-index keeps the lines just above the map but below the app's
+    // UI (cards, menus) which live outside the map at higher z-indexes.
     Object.assign(svg.style, {
-      position: "fixed", inset: "0", width: "100vw", height: "100vh",
-      pointerEvents: "none", zIndex: "9998",
+      position: "absolute", inset: "0", width: "100%", height: "100%",
+      pointerEvents: "none", zIndex: "1",
     });
     defsEl = document.createElementNS(NS, "defs");
     svg.appendChild(defsEl);
+    // Gentle breathing glow on live origin markers (see .wdl-live-halo toggle in draw()).
+    const st = document.createElementNS(NS, "style");
+    st.textContent =
+      "@keyframes wdl-pulse{0%,100%{opacity:.5}50%{opacity:1}}" +
+      "#wdl-map-lines .wdl-live-halo{animation:wdl-pulse 1.6s ease-in-out infinite}";
+    svg.appendChild(st);
     gArcs = document.createElementNS(NS, "g");
     svg.appendChild(gArcs);
-    document.body.appendChild(svg);
+    gNodes = document.createElementNS(NS, "g"); // origin markers, painted above all ribbons
+    svg.appendChild(gNodes);
+    // Inject INTO the map container so the lines share the map's stacking context and fall behind
+    // the app UI. Fall back to a fixed full-viewport overlay only if the container is unavailable.
+    const container = (map && typeof map.getContainer === "function" && map.getContainer()) || document.body;
+    if (container === document.body) { svg.style.position = "fixed"; svg.style.zIndex = "9998"; }
+    container.appendChild(svg);
   };
 
   const rateOf = (events, now) => {
@@ -228,7 +297,7 @@
       const ty = 2 * u * (Cy - A.y) + 2 * t * (B.y - Cy);
       const tl = Math.hypot(tx, ty) || 1;
       const ux = -ty / tl, uy = tx / tl;
-      const w = (0.4 + Math.pow(t, 1.4) * wMax) / 2; // half-width, tapered
+      const w = (2.4 + Math.pow(t, 1.4) * wMax) / 2; // half-width: visible at source, tapered wider toward region
       left += (i ? " L " : "M ") + (px + ux * w) + " " + (py + uy * w);
       right = " L " + (px - ux * w) + " " + (py - uy * w) + right;
     }
@@ -241,7 +310,11 @@
     const target = b && b.region && regionPos[b.region];
     if (!enabled || !b || !target) {
       gArcs.style.display = "none";
-      if (doPost) window.postMessage({ __wdl: CHANNEL, kind: "summary", active: false }, location.origin);
+      // Still surface the picked battle's header so the card shows "Region · A vs D" while
+      // metadata/first hits are still loading.
+      if (doPost) window.postMessage(
+        { __wdl: CHANNEL, kind: "summary", active: false, header: b ? b.header : null }, location.origin
+      );
       return;
     }
     gArcs.style.display = "";
@@ -281,7 +354,14 @@
         path.setAttribute("fill", `url(#wdlg-${r.cid})`);
         path.setAttribute("stroke", "none");
         gArcs.appendChild(path);
-        e = { path, grad, s0, s1 };
+        // Origin marker: a soft halo behind a solid, white-rimmed core dot.
+        const halo = document.createElementNS(NS, "circle");
+        halo.setAttribute("stroke", "none");
+        const core = document.createElementNS(NS, "circle");
+        core.setAttribute("stroke", "#fff");
+        core.setAttribute("stroke-width", "1.25");
+        gNodes.append(halo, core);
+        e = { path, grad, s0, s1, halo, core };
         arcEls.set(r.cid, e);
       }
       const cp = map.project(r.pos);
@@ -289,23 +369,33 @@
       const wMax = 2 + (r.rate / maxRate) * 9;
       const live_ = r.rate > 0;
       e.path.setAttribute("d", ribbonPath(cp, tp, wMax));
-      // gradient runs from source (faint) to region (bright), following the line
+      // gradient runs from source (clearly visible) to region (brightest), following the line
       e.grad.setAttribute("x1", cp.x); e.grad.setAttribute("y1", cp.y);
       e.grad.setAttribute("x2", tp.x); e.grad.setAttribute("y2", tp.y);
-      e.s0.setAttribute("stop-color", color); e.s0.setAttribute("stop-opacity", live_ ? "0.04" : "0.02");
-      e.s1.setAttribute("stop-color", color); e.s1.setAttribute("stop-opacity", live_ ? "0.95" : "0.25");
+      e.s0.setAttribute("stop-color", color); e.s0.setAttribute("stop-opacity", live_ ? "0.38" : "0.14");
+      e.s1.setAttribute("stop-color", color); e.s1.setAttribute("stop-opacity", live_ ? "0.98" : "0.28");
+
+      // Origin node — clearly marks where this country's damage flows FROM. Sized by rate.
+      const rCore = 3 + (r.rate / maxRate) * 4;
+      e.core.setAttribute("cx", cp.x); e.core.setAttribute("cy", cp.y); e.core.setAttribute("r", rCore);
+      e.core.setAttribute("fill", color); e.core.setAttribute("fill-opacity", live_ ? "1" : "0.5");
+      e.core.setAttribute("stroke-opacity", live_ ? "0.9" : "0.4");
+      e.halo.setAttribute("cx", cp.x); e.halo.setAttribute("cy", cp.y); e.halo.setAttribute("r", rCore * 2.5);
+      e.halo.setAttribute("fill", color); e.halo.setAttribute("fill-opacity", live_ ? "0.22" : "0.08");
+      e.halo.classList.toggle("wdl-live-halo", live_); // pulse only while actively dealing damage
     }
     // remove arcs no longer shown
     for (const [cid, e] of arcEls) {
-      if (!live.has(cid)) { e.path.remove(); e.grad.remove(); arcEls.delete(cid); }
+      if (!live.has(cid)) { e.path.remove(); e.grad.remove(); e.halo.remove(); e.core.remove(); arcEls.delete(cid); }
     }
 
-    if (doPost) postSummary(shown, totals);
+    if (doPost) postSummary(shown, totals, b.header);
   };
 
-  const postSummary = (rows, totals) => {
+  const postSummary = (rows, totals, header) => {
     window.postMessage({
       __wdl: CHANNEL, kind: "summary", active: true,
+      header: header || null,
       totals,
       countries: rows.map((r) => ({
         code: (countryMeta[r.cid] || {}).code || "",
@@ -315,13 +405,165 @@
     }, location.origin);
   };
 
+  // ---- our own Centrifugo connection (subscribe to any battle) ----------
+  // Lets the user pick a battle in the overlay and watch its damage flow WITHOUT opening the
+  // battle page. We open a second, independent Centrifugo socket (never touching the game's own
+  // client) and subscribe to `battleLastHits:<id>`; frames feed the same onLastHit pipeline,
+  // tagged "self". Protocol is Centrifugo v2 JSON: connect{token} -> subscribe{channel,token,
+  // flag} -> publications arrive as push.pub.data; empty-object `{}` frames are pings both ways.
+  // Channels are private, so each subscribe needs a per-channel JWT from centrifugo.* endpoints.
+  const wsc = {
+    sock: null,
+    connected: false,
+    cmdId: 1,
+    connecting: false,
+    subs: new Set(),        // channels we intend to stay subscribed to
+    tokenCache: new Map(),  // channel -> subscription JWT (server TTL ~1h)
+    retry: 0,
+  };
+
+  const wsSend = (obj) => {
+    try { if (wsc.sock && wsc.sock.readyState === 1) wsc.sock.send(JSON.stringify(obj)); }
+    catch (_) { /* ignore */ }
+  };
+
+  const scheduleReconnect = () => {
+    const delay = Math.min(15000, 1000 * Math.pow(2, wsc.retry++));
+    setTimeout(() => { if (wsc.subs.size) wsConnect(); }, delay);
+  };
+
+  const wsConnect = async () => {
+    if (wsc.connecting || (wsc.sock && wsc.sock.readyState <= 1)) return;
+    wsc.connecting = true;
+    let token = null;
+    try {
+      const jwt = await trpcMutate("centrifugo.getJWT", {});
+      token = (jwt && (jwt.token || (jwt.json && jwt.json.token))) || null;
+    } catch (_) { /* fall through */ }
+    if (!token) { wsc.connecting = false; scheduleReconnect(); return; }
+
+    const s = new WebSocket(WS_URL);
+    wsc.sock = s;
+    s.onopen = () => { wsc.cmdId = 1; wsSend({ connect: { token, name: "js" }, id: wsc.cmdId++ }); };
+    s.onmessage = (ev) => wsOnMessage(ev.data);
+    s.onclose = () => { wsc.connected = false; wsc.connecting = false; if (wsc.subs.size) scheduleReconnect(); };
+    s.onerror = () => { try { s.close(); } catch (_) {} };
+  };
+
+  const wsOnMessage = (raw) => {
+    if (typeof raw !== "string") return;
+    for (const line of raw.split("\n")) {
+      if (!line) continue;
+      if (line === "{}") { wsSend({}); continue; } // server ping -> pong
+      let f; try { f = JSON.parse(line); } catch (_) { continue; }
+      // connect reply (id 1): connection is up -> (re)subscribe every intended channel.
+      if (f.id === 1 && f.connect) {
+        wsc.connected = true; wsc.retry = 0; wsc.connecting = false;
+        for (const ch of wsc.subs) sendSubscribe(ch);
+        continue;
+      }
+      const push = f.push;
+      const channel = push && push.channel;
+      const data = push && push.pub && push.pub.data;
+      if (channel && data && data.type === "new_hit" && channel.startsWith("battleLastHits:")) {
+        const lh = data.lastHit || {};
+        onLastHit({
+          battleId: channel.slice("battleLastHits:".length),
+          side: data.side,
+          user: lh.user,
+          damages: Number(lh.damages) || 0,
+        }, "self");
+      }
+    }
+  };
+
+  const sendSubscribe = async (channel) => {
+    let token = wsc.tokenCache.get(channel);
+    if (!token) {
+      try {
+        const t = await trpcMutate("centrifugo.getSubscriptionToken", { channel });
+        token = typeof t === "string" ? t : (t && t.json) || null;
+      } catch (_) { token = null; }
+      if (token) wsc.tokenCache.set(channel, token);
+    }
+    if (!token || !wsc.connected || !wsc.subs.has(channel)) return;
+    wsSend({ subscribe: { channel, token, flag: 1 }, id: wsc.cmdId++ });
+  };
+
+  const selfSubscribe = (battleId) => {
+    const channel = "battleLastHits:" + battleId;
+    if (wsc.subs.has(channel)) return;
+    wsc.subs.add(channel);
+    if (wsc.connected) sendSubscribe(channel);
+    else wsConnect();
+  };
+
+  const selfUnsubscribe = (battleId) => {
+    const channel = "battleLastHits:" + battleId;
+    if (!wsc.subs.delete(channel)) return;
+    wsSend({ unsubscribe: { channel }, id: wsc.cmdId++ });
+  };
+
+  // ---- overlay-driven battle selection + list ---------------------------
+  const selectBattle = (battleId) => {
+    const prev = manualBattleId;
+    if (prev && prev !== battleId) selfUnsubscribe(prev);
+    manualBattleId = battleId || null;
+
+    if (manualBattleId) {
+      activeBattleId = manualBattleId;
+      ensureBattle(manualBattleId);
+      selfSubscribe(manualBattleId);
+    } else {
+      activeBattleId = null; // back to following the game tap on the next hit
+    }
+    // Reset the view immediately so the previous battle's lines don't linger.
+    for (const [, e] of arcEls) { e.path.remove(); e.grad.remove(); }
+    arcEls.clear();
+    draw(true);
+  };
+
+  const buildBattleList = async () => {
+    let grouped;
+    try { grouped = await trpcRaw("battle.getGroupedActiveBattles", {}); }
+    catch (_) { return; }
+    const g = (grouped && grouped.json) || grouped || {};
+    // De-dupe ids across groups, remembering the first (most relevant) group each appeared in.
+    const order = ["favorites", "yourCountry", "allies", "enemy", "withBounty", "orders", "other", "tournament"];
+    const seen = new Map(); // battleId -> group
+    for (const grp of order) {
+      const ids = Array.isArray(g[grp]) ? g[grp] : [];
+      for (const id of ids) if (typeof id === "string" && !seen.has(id)) seen.set(id, grp);
+    }
+    const ids = [...seen.keys()].slice(0, 60); // cap the on-demand getById fan-out
+    const items = await Promise.all(ids.map(async (id) => {
+      try {
+        const d = await trpcRaw("battle.getById", { battleId: id });
+        const region = d && d.defender && d.defender.region;
+        return {
+          battleId: id,
+          group: seen.get(id),
+          regionName: (region && regionMeta[region] && regionMeta[region].name) || null,
+          attacker: countryLabel(d && d.attacker && d.attacker.country),
+          defender: countryLabel(d && d.defender && d.defender.country),
+        };
+      } catch (_) { return null; }
+    }));
+    window.postMessage(
+      { __wdl: CHANNEL, kind: "battleList", battles: items.filter(Boolean), selected: manualBattleId },
+      location.origin
+    );
+  };
+
   // ---- wiring -----------------------------------------------------------
   window.addEventListener("message", (e) => {
     if (e.source !== window || e.origin !== location.origin) return;
     const d = e.data;
     if (!d || d.__wdl !== CHANNEL) return;
-    if (d.kind === "lasthit") onLastHit(d);
+    if (d.kind === "lasthit") onLastHit(d, "tap");
     else if (d.kind === "config") { enabled = d.enabled !== false; draw(true); }
+    else if (d.kind === "selectBattle") selectBattle(d.battleId || null);
+    else if (d.kind === "requestBattleList") buildBattleList();
   });
 
   const start = async () => {
