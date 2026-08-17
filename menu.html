@@ -23,6 +23,18 @@
       input:checked + .slider { background: #4ade80; }
       input:checked + .slider::before { transform: translateX(18px); }
       .hint { margin-top: 12px; font-size: 10px; opacity: .5; }
+      .auth { margin-top: 4px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,.07); }
+      .auth-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .auth-status { display: flex; align-items: center; gap: 6px; font-size: 12px; min-width: 0; }
+      .auth-status .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: #6b6f7a; }
+      .auth-status.on .dot { background: #4ade80; box-shadow: 0 0 6px #4ade80; }
+      .auth-status .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .85; }
+      .auth button { font: inherit; font-size: 12px; padding: 5px 10px; border-radius: 6px; border: none;
+        cursor: pointer; background: #3a3d47; color: #e8e8ea; }
+      .auth button:hover { background: #4a4d57; }
+      .auth button:disabled { opacity: .5; cursor: default; }
+      .auth-note { margin-top: 6px; font-size: 10px; opacity: .6; line-height: 1.4; }
+      .auth-note.error { color: #ff8a8a; opacity: .9; }
     </style>
   </head>
   <body>
@@ -50,7 +62,18 @@
         </label>
       </div>
       <div class="hint">Open app.warera.io to see the effect.</div>
+      <div class="auth">
+        <div class="auth-row">
+          <span class="auth-status" id="auth-status">
+            <span class="dot"></span>
+            <span class="name" id="auth-name">Checking…</span>
+          </span>
+          <button id="auth-btn" disabled>…</button>
+        </div>
+        <div class="auth-note" id="auth-note"></div>
+      </div>
     </div>
+    <script src="browser-polyfill.js"></script>
     <script src="menu.js"></script>
   </body>
 </html>
