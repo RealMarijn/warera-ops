@@ -1,36 +1,45 @@
 // WarEra Damage lines — MAIN-world engine + map renderer.
 //
-// Model (per user request): for the battle being spectated, draw one line from
-// EACH contributing player-country to the contested region, thickness ∝ that
-// country's live damage rate, coloured by side (attacker = red, defender = blue).
+// Model: any number of overlay panels can each independently pick a battle to
+// watch (a "panel" is one LIVE Damage tracker window — see overlay.js, which
+// can spawn several). For EVERY distinct battle currently watched by at least
+// one panel, this engine keeps a live Centrifugo subscription and continuously
+// recomputes that battle's map arcs every tick — even while that battle isn't
+// the "active" one — so that switching which panel is active only needs to
+// swap SVG visibility, never wait on data. Only the currently active panel's
+// battle is actually drawn on the map (showing every watched battle's lines
+// at once would be unreadable); "active" = whichever panel the user last
+// clicked, tracked via `activePanelId`.
 //
 // Runs in the MAIN world because it needs (a) the page's MapLibre Map instance,
 // (b) same-origin tRPC calls with the game's auth cookies, and (c) to open its OWN
-// Centrifugo WebSocket (so it can subscribe to a battle the user picked in the
-// overlay, even without that battle page open). Data in:
+// Centrifugo WebSocket (so it can subscribe to battles the user picked in the
+// overlay, even without those battle pages open). Data in:
 //   hook.js  -> {kind:"lasthit", battleId, side, user, damages}   (game tap, per hit)
 //   overlay  -> {kind:"config", enabled}
-//   overlay  -> {kind:"selectBattle", battleId}      (pick/clear a battle to watch)
-//   overlay  -> {kind:"requestBattleList"}           (populate the picker)
+//   overlay  -> {kind:"registerPanel", panelId}      (a new tracker window was created)
+//   overlay  -> {kind:"unregisterPanel", panelId}     (a tracker window was closed)
+//   overlay  -> {kind:"selectBattle", panelId, battleId}  (pick/clear a battle for one panel)
+//   overlay  -> {kind:"setActivePanel", panelId}      (which panel's lines to draw)
+//   overlay  -> {kind:"requestBattleList"}            (populate the picker)
 // Data out:
-//   -> {kind:"summary", ..., header}   per-country totals + "Region · A vs D" header
-//   -> {kind:"battleList", battles}    active battles for the picker
+//   -> {kind:"summary", panelId, ..., header}   per-panel per-country totals
+//   -> {kind:"battleList", battles}             active battles for the picker
 //
 // Pipeline: lasthit -> resolve user's country (cached) -> aggregate per country ->
-// project country + region centroid -> draw/update arcs. The lines track ONLY the
-// battle the user picks in the overlay, fed by our own subscription (tagged "self").
-// The game tap (hook.js, fired by opening a battle page) is received but ignored on
-// purpose — nothing is drawn until a battle is selected in the picker.
+// project country + region centroid -> draw/update arcs, per watched battle. The
+// game tap (hook.js, fired by opening a battle page) is received but ignored on
+// purpose — nothing is drawn until a battle is picked in some panel's picker.
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlEngine = "0.7.2"; } catch (_) {}
-  console.log("[WDL] map.js engine v0.7.2 (lines layered inside the map) loaded");
+  try { document.documentElement.dataset.wdlEngine = "0.9.3"; } catch (_) {}
+  console.log("[WDL] map.js engine v0.9.3 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const NS = "http://www.w3.org/2000/svg";
   const RATE_WINDOW_MS = 60_000;   // sliding window for "damage/min"
-  const MAX_LINES = 14;            // cap arcs to avoid clutter
+  const MAX_LINES = 14;            // cap arcs to avoid clutter, per battle
   const ATT = "#ff5a5a", DEF = "#5aa9ff";
   const WS_URL = "wss://ws.warera.io/connection/websocket"; // WarEra's Centrifugo endpoint
 
@@ -44,11 +53,12 @@
 
   // battleId -> { region, meta, header, countries: Map<countryId,{side,total,events:[{t,dmg}]}> }
   const battles = new Map();
-  let activeBattleId = null;
-  // Battle chosen in the overlay's picker. When set, it takes priority over whatever battle
-  // the game itself is spectating, and we feed it from OUR OWN Centrifugo subscription (below)
-  // instead of hook.js's passive tap — so it works even without the battle page open.
-  let manualBattleId = null;
+
+  // panelId -> battleId|null. Every open overlay window (panel) independently picks a battle;
+  // several panels may watch the same battle. Populated by registerPanel/selectBattle.
+  const panelBattle = new Map();
+  // Which panel's battle is currently drawn on the map. Whichever window the user clicked last.
+  let activePanelId = null;
 
   const userCountry = new Map();     // userId -> countryId | null (null = resolving)
   const pendingByUser = new Map();   // userId -> [{battleId, side, dmg, t}]
@@ -184,7 +194,7 @@
     return b;
   };
 
-  // ---- damage attribution ----------------------------------------------
+  // ---- damage attribution ------------------------------------------------
   const addDamage = (battleId, countryId, side, dmg, t) => {
     const b = ensureBattle(battleId);
     let c = b.countries.get(countryId);
@@ -206,13 +216,19 @@
       .catch(() => { userCountry.delete(userId); pendingByUser.delete(userId); });
   };
 
+  // Distinct battle ids at least one panel currently has selected.
+  const watchedBattleIds = () => {
+    const s = new Set();
+    for (const battleId of panelBattle.values()) if (battleId) s.add(battleId);
+    return s;
+  };
+
   const onLastHit = (m, source) => {
     if (!m.user) return;
-    // Manual-only: the damage lines track ONLY the battle picked in the overlay, fed by our own
+    // Manual-only: lines track ONLY battles picked in some panel's picker, fed by our own
     // Centrifugo subscription ("self"). Opening a battle page (the game tap) is ignored on purpose.
-    if (!manualBattleId || m.battleId !== manualBattleId || source !== "self") return;
+    if (source !== "self" || !watchedBattleIds().has(m.battleId)) return;
 
-    activeBattleId = manualBattleId;
     ensureBattle(m.battleId);
     const t = Date.now();
     const cid = userCountry.get(m.user);
@@ -229,15 +245,21 @@
     }
   };
 
-  // ---- rendering --------------------------------------------------------
+  // ---- rendering ----------------------------------------------------------
   // Each line is a tapered "ribbon" (a filled polygon that follows a quadratic
   // curve) rather than a plain stroke — a stroke can't vary its width. It has a
   // visible width at the SOURCE country and widens toward the region, filled with
   // a linear gradient that stays clearly visible at the source and brightens toward
   // the region, so the flow reads as "into" the contested region. A glowing origin
   // node (halo + core, sized by damage rate) marks exactly where each line starts.
-  let svg, gArcs, gNodes, defsEl;
-  const arcEls = new Map(); // countryId -> { path, grad, s0, s1, halo, core }
+  //
+  // One sub-<g> pair (arcs + nodes) per WATCHED battle, so every watched battle's
+  // arcs stay continuously up to date (position, rate) even while hidden — making
+  // the switch to a newly-active panel instant (just a display:none/'' toggle,
+  // never a recompute-from-scratch). All battles' node groups paint above ALL
+  // battles' arc groups (two top-level containers), same layering as before.
+  let svg, gAllArcs, gAllNodes, defsEl;
+  const battleDraw = new Map(); // battleId -> { gArcs, gNodes, arcEls: Map<countryId,{...}> }
 
   const ensureSvg = () => {
     if (svg) return;
@@ -252,21 +274,44 @@
     });
     defsEl = document.createElementNS(NS, "defs");
     svg.appendChild(defsEl);
-    // Gentle breathing glow on live origin markers (see .wdl-live-halo toggle in draw()).
+    // Gentle breathing glow on live origin markers (see .wdl-live-halo toggle in updateBattleDraw()).
     const st = document.createElementNS(NS, "style");
     st.textContent =
       "@keyframes wdl-pulse{0%,100%{opacity:.5}50%{opacity:1}}" +
       "#wdl-map-lines .wdl-live-halo{animation:wdl-pulse 1.6s ease-in-out infinite}";
     svg.appendChild(st);
-    gArcs = document.createElementNS(NS, "g");
-    svg.appendChild(gArcs);
-    gNodes = document.createElementNS(NS, "g"); // origin markers, painted above all ribbons
-    svg.appendChild(gNodes);
+    gAllArcs = document.createElementNS(NS, "g");
+    svg.appendChild(gAllArcs);
+    gAllNodes = document.createElementNS(NS, "g"); // origin markers, painted above ALL ribbons
+    svg.appendChild(gAllNodes);
     // Inject INTO the map container so the lines share the map's stacking context and fall behind
     // the app UI. Fall back to a fixed full-viewport overlay only if the container is unavailable.
     const container = (map && typeof map.getContainer === "function" && map.getContainer()) || document.body;
     if (container === document.body) { svg.style.position = "fixed"; svg.style.zIndex = "9998"; }
     container.appendChild(svg);
+  };
+
+  const ensureBattleDraw = (battleId) => {
+    let bd = battleDraw.get(battleId);
+    if (!bd) {
+      const gArcs = document.createElementNS(NS, "g");
+      gArcs.setAttribute("data-battle", battleId);
+      gAllArcs.appendChild(gArcs);
+      const gNodes = document.createElementNS(NS, "g");
+      gNodes.setAttribute("data-battle", battleId);
+      gAllNodes.appendChild(gNodes);
+      bd = { gArcs, gNodes, arcEls: new Map() };
+      battleDraw.set(battleId, bd);
+    }
+    return bd;
+  };
+
+  const teardownBattleDraw = (battleId) => {
+    const bd = battleDraw.get(battleId);
+    if (!bd) return;
+    bd.gArcs.remove();
+    bd.gNodes.remove();
+    battleDraw.delete(battleId);
   };
 
   const rateOf = (events, now) => {
@@ -304,21 +349,18 @@
     return left + right + " Z";
   };
 
-  const draw = (doPost) => {
-    if (!ready || !svg) return;
-    const b = activeBattleId && battles.get(activeBattleId);
+  // Recompute one battle's arcs/nodes for the current frame. Runs for EVERY watched battle every
+  // tick, active or not — that's what makes switching the active panel instant (see file header).
+  // Returns a snapshot used both to decide what's drawn and to build panel summaries.
+  const updateBattleDraw = (battleId, now) => {
+    const b = battles.get(battleId);
+    const bd = ensureBattleDraw(battleId);
     const target = b && b.region && regionPos[b.region];
-    if (!enabled || !b || !target) {
-      gArcs.style.display = "none";
-      // Still surface the picked battle's header so the card shows "Region · A vs D" while
-      // metadata/first hits are still loading.
-      if (doPost) window.postMessage(
-        { __wdl: CHANNEL, kind: "summary", active: false, header: b ? b.header : null }, location.origin
-      );
-      return;
+    if (!b || !target) {
+      bd.gArcs.style.display = "none";
+      bd.gNodes.style.display = "none";
+      return { active: false, header: b ? b.header : null };
     }
-    gArcs.style.display = "";
-    const now = Date.now();
     const tp = map.project(target);
 
     // rank contributing countries by current rate; also sum rates per side across
@@ -341,28 +383,31 @@
     const live = new Set();
     for (const r of shown) {
       live.add(r.cid);
-      let e = arcEls.get(r.cid);
+      let e = bd.arcEls.get(r.cid);
       if (!e) {
         const grad = document.createElementNS(NS, "linearGradient");
         grad.setAttribute("gradientUnits", "userSpaceOnUse");
-        grad.id = "wdlg-" + r.cid;
+        // Scoped by battleId too — the same country can appear in two different watched
+        // battles at once, and gradient ids must be unique across the whole document.
+        const gradId = "wdlg-" + battleId + "-" + r.cid;
+        grad.id = gradId;
         const s0 = document.createElementNS(NS, "stop"); s0.setAttribute("offset", "0");
         const s1 = document.createElementNS(NS, "stop"); s1.setAttribute("offset", "1");
         grad.append(s0, s1);
         defsEl.appendChild(grad);
         const path = document.createElementNS(NS, "path");
-        path.setAttribute("fill", `url(#wdlg-${r.cid})`);
+        path.setAttribute("fill", `url(#${gradId})`);
         path.setAttribute("stroke", "none");
-        gArcs.appendChild(path);
+        bd.gArcs.appendChild(path);
         // Origin marker: a soft halo behind a solid, white-rimmed core dot.
         const halo = document.createElementNS(NS, "circle");
         halo.setAttribute("stroke", "none");
         const core = document.createElementNS(NS, "circle");
         core.setAttribute("stroke", "#fff");
         core.setAttribute("stroke-width", "1.25");
-        gNodes.append(halo, core);
+        bd.gNodes.append(halo, core);
         e = { path, grad, s0, s1, halo, core };
-        arcEls.set(r.cid, e);
+        bd.arcEls.set(r.cid, e);
       }
       const cp = map.project(r.pos);
       const color = r.side === "attacker" ? ATT : DEF;
@@ -384,20 +429,53 @@
       e.halo.setAttribute("fill", color); e.halo.setAttribute("fill-opacity", live_ ? "0.22" : "0.08");
       e.halo.classList.toggle("wdl-live-halo", live_); // pulse only while actively dealing damage
     }
-    // remove arcs no longer shown
-    for (const [cid, e] of arcEls) {
-      if (!live.has(cid)) { e.path.remove(); e.grad.remove(); e.halo.remove(); e.core.remove(); arcEls.delete(cid); }
+    // remove this battle's arcs no longer shown
+    for (const [cid, e] of bd.arcEls) {
+      if (!live.has(cid)) { e.path.remove(); e.grad.remove(); e.halo.remove(); e.core.remove(); bd.arcEls.delete(cid); }
     }
 
-    if (doPost) postSummary(shown, totals, b.header);
+    return { active: true, header: b.header, totals, countries: shown };
   };
 
-  const postSummary = (rows, totals, header) => {
+  const draw = (doPost) => {
+    if (!ready || !svg) return;
+    const watched = watchedBattleIds();
+
+    // Drop draw state for battles no longer watched by any panel.
+    for (const battleId of battleDraw.keys()) {
+      if (!watched.has(battleId)) teardownBattleDraw(battleId);
+    }
+
+    const activeBattleId = activePanelId ? (panelBattle.get(activePanelId) || null) : null;
+    const now = Date.now();
+    const snapshots = new Map(); // battleId -> snapshot, reused for panel summaries below
+
+    for (const battleId of watched) {
+      const snap = enabled ? updateBattleDraw(battleId, now) : { active: false, header: (battles.get(battleId) || {}).header || null };
+      snapshots.set(battleId, snap);
+      const bd = battleDraw.get(battleId);
+      if (bd) {
+        const show = enabled && snap.active && battleId === activeBattleId;
+        bd.gArcs.style.display = show ? "" : "none";
+        bd.gNodes.style.display = show ? "" : "none";
+      }
+    }
+
+    if (doPost) {
+      for (const [panelId, battleId] of panelBattle) {
+        if (!battleId) { postPanelSummary(panelId, { active: false, header: null }); continue; }
+        postPanelSummary(panelId, snapshots.get(battleId) || { active: false, header: null });
+      }
+    }
+  };
+
+  const postPanelSummary = (panelId, snap) => {
     window.postMessage({
-      __wdl: CHANNEL, kind: "summary", active: true,
-      header: header || null,
-      totals,
-      countries: rows.map((r) => ({
+      __wdl: CHANNEL, kind: "summary", panelId,
+      active: !!snap.active,
+      header: snap.header || null,
+      totals: snap.totals || null,
+      countries: (snap.countries || []).map((r) => ({
         code: (countryMeta[r.cid] || {}).code || "",
         name: (countryMeta[r.cid] || {}).name || "?",
         side: r.side, total: r.total, rate: r.rate,
@@ -406,12 +484,12 @@
   };
 
   // ---- our own Centrifugo connection (subscribe to any battle) ----------
-  // Lets the user pick a battle in the overlay and watch its damage flow WITHOUT opening the
-  // battle page. We open a second, independent Centrifugo socket (never touching the game's own
-  // client) and subscribe to `battleLastHits:<id>`; frames feed the same onLastHit pipeline,
-  // tagged "self". Protocol is Centrifugo v2 JSON: connect{token} -> subscribe{channel,token,
-  // flag} -> publications arrive as push.pub.data; empty-object `{}` frames are pings both ways.
-  // Channels are private, so each subscribe needs a per-channel JWT from centrifugo.* endpoints.
+  // Lets panels pick a battle to watch WITHOUT opening the battle page. We open a second,
+  // independent Centrifugo socket (never touching the game's own client) and subscribe to
+  // `battleLastHits:<id>` for every currently-watched battle; frames feed the same onLastHit
+  // pipeline, tagged "self". Protocol is Centrifugo v2 JSON: connect{token} -> subscribe{channel,
+  // token,flag} -> publications arrive as push.pub.data; empty-object `{}` frames are pings both
+  // ways. Channels are private, so each subscribe needs a per-channel JWT from centrifugo.* endpoints.
   const wsc = {
     sock: null,
     connected: false,
@@ -504,23 +582,43 @@
     wsSend({ unsubscribe: { channel }, id: wsc.cmdId++ });
   };
 
-  // ---- overlay-driven battle selection + list ---------------------------
-  const selectBattle = (battleId) => {
-    const prev = manualBattleId;
-    if (prev && prev !== battleId) selfUnsubscribe(prev);
-    manualBattleId = battleId || null;
-
-    if (manualBattleId) {
-      activeBattleId = manualBattleId;
-      ensureBattle(manualBattleId);
-      selfSubscribe(manualBattleId);
-    } else {
-      activeBattleId = null; // back to following the game tap on the next hit
+  // Subscribe to every battle at least one panel watches; unsubscribe from any battle no panel
+  // watches anymore. Cheap to call after any panel's selection changes.
+  const reconcileSubscriptions = () => {
+    const watched = watchedBattleIds();
+    for (const battleId of watched) selfSubscribe(battleId);
+    for (const channel of [...wsc.subs]) {
+      const battleId = channel.slice("battleLastHits:".length);
+      if (!watched.has(battleId)) selfUnsubscribe(battleId);
     }
-    // Reset the view immediately so the previous battle's lines/markers don't linger.
-    for (const [, e] of arcEls) { e.path.remove(); e.grad.remove(); e.halo.remove(); e.core.remove(); }
-    arcEls.clear();
+  };
+
+  // ---- overlay-driven panel registry + battle selection ------------------
+  const registerPanel = (panelId) => {
+    if (!panelBattle.has(panelId)) panelBattle.set(panelId, null);
+  };
+
+  // A tracker window was closed — stop tracking its battle selection. Overlay always reassigns
+  // activePanelId to a surviving panel (in a separate setActivePanel message) before/after this
+  // when the closed one was active, so activePanelId is never left dangling here.
+  const unregisterPanel = (panelId) => {
+    panelBattle.delete(panelId);
+    reconcileSubscriptions(); // that battle may now have zero watchers
     draw(true);
+  };
+
+  const selectBattle = (panelId, battleId) => {
+    registerPanel(panelId);
+    panelBattle.set(panelId, battleId || null);
+    if (battleId) ensureBattle(battleId);
+    reconcileSubscriptions();
+    draw(true);
+  };
+
+  const setActivePanel = (panelId) => {
+    registerPanel(panelId);
+    activePanelId = panelId;
+    draw(true); // swap SVG visibility immediately — no waiting on the next tick
   };
 
   const buildBattleList = async () => {
@@ -550,7 +648,7 @@
       } catch (_) { return null; }
     }));
     window.postMessage(
-      { __wdl: CHANNEL, kind: "battleList", battles: items.filter(Boolean), selected: manualBattleId },
+      { __wdl: CHANNEL, kind: "battleList", battles: items.filter(Boolean) },
       location.origin
     );
   };
@@ -562,7 +660,10 @@
     if (!d || d.__wdl !== CHANNEL) return;
     if (d.kind === "lasthit") onLastHit(d, "tap");
     else if (d.kind === "config") { enabled = d.enabled !== false; draw(true); }
-    else if (d.kind === "selectBattle") selectBattle(d.battleId || null);
+    else if (d.kind === "registerPanel") registerPanel(d.panelId);
+    else if (d.kind === "unregisterPanel") unregisterPanel(d.panelId);
+    else if (d.kind === "selectBattle") selectBattle(d.panelId, d.battleId || null);
+    else if (d.kind === "setActivePanel") setActivePanel(d.panelId);
     else if (d.kind === "requestBattleList") buildBattleList();
   });
 
@@ -571,7 +672,7 @@
     try { ready = await buildLookups(); } catch (_) { ready = false; }
     if (!ready) { setTimeout(start, 1500); return; }
     map.on("render", () => draw(false));   // reproject only
-    setInterval(() => draw(true), 1000);   // refresh rates + push summary
+    setInterval(() => draw(true), 1000);   // refresh rates + push summaries
     draw(true);
   };
 
