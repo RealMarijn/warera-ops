@@ -33,8 +33,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlEngine = "0.9.3"; } catch (_) {}
-  console.log("[WDL] map.js engine v0.9.3 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlEngine = "0.9.4"; } catch (_) {}
+  console.log("[WDL] map.js engine v0.9.4 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const NS = "http://www.w3.org/2000/svg";
@@ -627,7 +627,7 @@
     catch (_) { return; }
     const g = (grouped && grouped.json) || grouped || {};
     // De-dupe ids across groups, remembering the first (most relevant) group each appeared in.
-    const order = ["favorites", "yourCountry", "allies", "enemy", "withBounty", "orders", "other", "tournament"];
+    const order = ["favorites", "yourCountry", "orders", "enemy", "withBounty", "allies", "other", "tournament"];
     const seen = new Map(); // battleId -> group
     for (const grp of order) {
       const ids = Array.isArray(g[grp]) ? g[grp] : [];

@@ -22,14 +22,14 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlPanel = "1.3.1"; } catch (_) {}
-  console.log("[WDL] overlay.js panel v1.3.1 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlPanel = "1.3.2"; } catch (_) {}
+  console.log("[WDL] overlay.js panel v1.3.2 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const FLAG = (code) => `https://media.warera.io/images/flags/${code}.svg?v=16`;
   const ATT = "#ff5a5a", DEF = "#5aa9ff";
   // Friendly names for battle.getGroupedActiveBattles groups, in display order.
-  const GROUP_ORDER = ["favorites", "yourCountry", "allies", "enemy", "withBounty", "orders", "other", "tournament"];
+  const GROUP_ORDER = ["favorites", "yourCountry", "orders", "enemy", "withBounty", "allies", "other", "tournament"];
   const GROUP_LABEL = {
     favorites: "Favorites", yourCountry: "Your country", allies: "Allies", enemy: "Enemies",
     withBounty: "With bounty", orders: "With orders", other: "Other", tournament: "Tournament",
