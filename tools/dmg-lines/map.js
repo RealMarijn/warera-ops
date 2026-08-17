@@ -24,8 +24,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlEngine = "0.7.1"; } catch (_) {}
-  console.log("[WDL] map.js engine v0.7.1 (lines layered inside the map) loaded");
+  try { document.documentElement.dataset.wdlEngine = "0.7.2"; } catch (_) {}
+  console.log("[WDL] map.js engine v0.7.2 (lines layered inside the map) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const NS = "http://www.w3.org/2000/svg";
@@ -517,8 +517,8 @@
     } else {
       activeBattleId = null; // back to following the game tap on the next hit
     }
-    // Reset the view immediately so the previous battle's lines don't linger.
-    for (const [, e] of arcEls) { e.path.remove(); e.grad.remove(); }
+    // Reset the view immediately so the previous battle's lines/markers don't linger.
+    for (const [, e] of arcEls) { e.path.remove(); e.grad.remove(); e.halo.remove(); e.core.remove(); }
     arcEls.clear();
     draw(true);
   };
