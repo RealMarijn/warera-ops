@@ -107,11 +107,19 @@
     style.textContent = `
       #wbm-map-badges .wbm-ring { opacity: 0; }
       #wbm-map-badges .wbm-pending .wbm-ring {
-        animation: wbmPulse 1.7s ease-in-out infinite; transform-box: fill-box; transform-origin: center;
+        animation: wbmPulse 1.6s ease-in-out infinite; transform-box: fill-box; transform-origin: center;
+      }
+      /* The badge itself gently "breathes" while pending, so it stands out from active ones. */
+      #wbm-map-badges .wbm-pending .wbm-core {
+        animation: wbmBreathe 1.6s ease-in-out infinite; transform-box: fill-box; transform-origin: center;
       }
       @keyframes wbmPulse {
         0%, 100% { transform: scale(1); opacity: .85; }
-        50%      { transform: scale(1.35); opacity: .1; }
+        50%      { transform: scale(1.9); opacity: 0; }
+      }
+      @keyframes wbmBreathe {
+        0%, 100% { transform: scale(1); }
+        50%      { transform: scale(1.16); }
       }`;
     gBadges = document.createElementNS(NS, "g");
     svg.append(style, gBadges);
@@ -151,6 +159,7 @@
     ring.setAttribute("stroke", meta.color);
     ring.setAttribute("stroke-width", "2.5");
     const circle = document.createElementNS(NS, "circle");
+    circle.setAttribute("class", "wbm-core");
     circle.setAttribute("r", "9");
     circle.setAttribute("fill", meta.color);
     circle.setAttribute("stroke", "#fff");
@@ -171,32 +180,62 @@
     lvlText.setAttribute("font-size", "8");
     lvlText.setAttribute("font-weight", "700");
     lvlText.setAttribute("fill", "#fff");
+    // Live countdown label below the badge (pending only). A dark halo via
+    // paint-order keeps it legible over any map colour.
+    const cd = document.createElementNS(NS, "text");
+    cd.setAttribute("x", "0"); cd.setAttribute("y", "20");
+    cd.setAttribute("text-anchor", "middle");
+    cd.setAttribute("dominant-baseline", "middle");
+    cd.setAttribute("font-family", "Saira, system-ui, sans-serif");
+    cd.setAttribute("font-size", "9");
+    cd.setAttribute("font-weight", "700");
+    cd.setAttribute("fill", "#fff");
+    cd.setAttribute("stroke", "rgba(0,0,0,.85)");
+    cd.setAttribute("stroke-width", "2.6");
+    cd.setAttribute("paint-order", "stroke");
+    cd.style.display = "none";
     const title = document.createElementNS(NS, "title");
-    g.append(ring, circle, glyph, lvlBg, lvlText, title);
-    return { g, circle, ring, lvlBg, lvlText, title };
+    g.append(ring, circle, glyph, lvlBg, lvlText, cd, title);
+    return { g, circle, ring, lvlBg, lvlText, cd, title };
   };
 
+  // Compact, ticking countdown: "3h 12m" / "12m 04s" / "45s" / "now".
   const fmtCountdown = (t) => {
     const ms = new Date(t).getTime() - Date.now();
     if (isNaN(ms)) return "";
-    if (ms <= 0) return "any moment";
-    const m = Math.round(ms / 60000);
-    if (m < 60) return "in " + m + "m";
-    const h = Math.floor(m / 60), mm = m % 60;
-    return "in " + h + "h" + (mm ? " " + mm + "m" : "");
+    if (ms <= 0) return "now";
+    const sec = Math.floor(ms / 1000);
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    if (h > 0) return h + "h " + m + "m";
+    if (m > 0) return m + "m " + String(s).padStart(2, "0") + "s";
+    return s + "s";
   };
 
   const updateBadge = (b, d) => {
     const meta = LAYER[d.layer];
     const pending = d.status === "p";
+    // Pending reads differently at a glance: pulsing ring, translucent fill and a
+    // dashed outline; active is a solid filled circle.
     b.g.setAttribute("class", pending ? "wbm-pending" : "");
     b.circle.setAttribute("fill-opacity", pending ? "0.55" : "1");
-    const when = pending ? "activating" + (d.t ? " " + fmtCountdown(d.t) : "") : "active";
+    b.circle.setAttribute("stroke-dasharray", pending ? "3 2" : "");
+    const when = pending ? "activating" + (d.t ? " in " + fmtCountdown(d.t) : "") : "active";
     b.title.textContent = `${meta.label} — ${when} · lvl ${d.level ?? "?"}`;
     const hasLvl = d.level != null;
     b.lvlText.textContent = hasLvl ? String(d.level) : "";
     b.lvlBg.style.display = hasLvl ? "" : "none";
     b.lvlText.style.display = hasLvl ? "" : "none";
+    // Countdown label (pending + known activation time only).
+    if (pending && d.t) { b.cd.style.display = ""; b.cd.textContent = fmtCountdown(d.t); }
+    else { b.cd.style.display = "none"; b.cd.textContent = ""; }
+  };
+
+  // Re-tick the countdown labels once a second (cheap: a handful of pending badges).
+  const updateCountdowns = () => {
+    for (const b of badges.values()) {
+      const d = b.d;
+      if (d && d.status === "p" && d.t && b.g.style.display !== "none") b.cd.textContent = fmtCountdown(d.t);
+    }
   };
 
   // ---- reconcile drawn badges against the current enabled+data set ------
@@ -334,6 +373,7 @@
     }
     ready = true;
     map.on("render", draw); // reproject as the map pans/zooms
+    setInterval(updateCountdowns, 1000); // live-tick pending countdown labels
     // Draw whatever data already arrived. We deliberately DON'T seed the notify
     // baseline here: prev[layer] stays null, so the first poll that lands after
     // we're ready is treated as the baseline (silent) rather than toasting the

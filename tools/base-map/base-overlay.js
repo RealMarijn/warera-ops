@@ -75,6 +75,7 @@
   function setLoggedIn(v) {
     if (loggedIn === v) return;
     loggedIn = v;
+    if (!v) clearAllToasts(); // approval lost → nothing base/bunker related stays on screen
     relayConfig();      // engine clears layers that are no longer effectively on
     schedulePolling();
   }
@@ -121,6 +122,7 @@
     .ttl { font-size: 12.5px; font-weight: 600; letter-spacing: 0.1px; }
     .sub { font-size: 11px; margin-top: 2px; color: rgba(238, 240, 244, 0.62); line-height: 1.35; }
     .sub .accent { color: var(--accent, #f59e0b); font-weight: 600; }
+    .sub .cd { font-weight: 600; font-variant-numeric: tabular-nums; }
     .ttl a { color: inherit; text-decoration: none; }
     .ttl a:hover { text-decoration: underline; }
     .sub a { color: var(--accent, #f59e0b); font-weight: 600; text-decoration: none; }
@@ -151,14 +153,16 @@
   const esc = (s) => String(s == null ? "" : s).replace(/[<>&"]/g, (c) =>
     ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
 
+  // Compact, ticking countdown: "3h 12m" / "12m 04s" / "45s" / "now".
   const fmtCountdown = (t) => {
     const ms = new Date(t).getTime() - Date.now();
     if (isNaN(ms)) return "";
-    if (ms <= 0) return "any moment";
-    const m = Math.round(ms / 60000);
-    if (m < 60) return "in " + m + "m";
-    const h = Math.floor(m / 60), mm = m % 60;
-    return "in " + h + "h" + (mm ? " " + mm + "m" : "");
+    if (ms <= 0) return "now";
+    const sec = Math.floor(ms / 1000);
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    if (h > 0) return h + "h " + m + "m";
+    if (m > 0) return m + "m " + String(s).padStart(2, "0") + "s";
+    return s + "s";
   };
 
   let clearBtn;
@@ -179,6 +183,10 @@
     stack.appendChild(clearBtn);
     root.append(style, stack);
     document.documentElement.appendChild(host);
+    // Live-tick every pending toast's countdown.
+    setInterval(() => {
+      for (const el of stack.querySelectorAll(".cd[data-t]")) el.textContent = fmtCountdown(el.dataset.t);
+    }, 1000);
   };
 
   const updateClearBtn = () => {
@@ -220,7 +228,7 @@
     const meta = META[item.layer];
     const pending = item.status === "p";
     const state = pending
-      ? `<span class="accent">activating</span>${item.t ? " " + esc(fmtCountdown(item.t)) : ""}`
+      ? `<span class="accent">activating</span>${item.t ? ` in <span class="cd" data-t="${esc(item.t)}">${esc(fmtCountdown(item.t))}</span>` : ""}`
       : `<span class="accent">now active</span>`;
     makeCard(
       item.layer + ":" + item.regionId,
@@ -258,6 +266,11 @@
       if (pendingTest[layer]) { pendingTest[layer] = false; showTest(layer, null); }
     }, 2500);
   };
+
+  function clearAllToasts() {
+    for (const layer of LAYERS) pendingTest[layer] = false;
+    if (stack) for (const c of [...stack.querySelectorAll(".card")]) removeCard(c);
+  }
 
   // ---- wiring -----------------------------------------------------------
   window.addEventListener("message", (e) => {

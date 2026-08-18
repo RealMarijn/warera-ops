@@ -64,6 +64,8 @@
         padding: 11px 0;
       }
       .row + .row { border-top: 1px solid var(--line); }
+      /* .row sets display:flex, which would otherwise beat the [hidden] UA rule */
+      .row[hidden] { display: none; }
 
       .label { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
       .label span { font-size: 12.5px; font-weight: 500; }
@@ -288,7 +290,7 @@
               </label>
             </div>
 
-            <div class="row">
+            <div class="row" id="row-bases" hidden>
               <span class="label">
                 <span>Military bases</span>
                 <small>Mark regions with an active or activating military base.</small>
@@ -299,7 +301,7 @@
               </label>
             </div>
 
-            <div class="row">
+            <div class="row" id="row-bunkers" hidden>
               <span class="label">
                 <span>Bunkers</span>
                 <small>Mark regions with an active or activating bunker.</small>

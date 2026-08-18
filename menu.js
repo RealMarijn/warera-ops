@@ -43,9 +43,24 @@ const mapBtn = document.getElementById("map-features-btn");
 const mapSubmenu = document.getElementById("map-submenu");
 const mapCountEl = document.getElementById("map-count");
 
+// Bases/bunkers pull from the whitelist-gated backend, so their menu rows only
+// exist for logged-in (approved) users. Hidden until auth resolves, and not
+// counted in the "N on" pill while hidden.
+const authGatedEls = new Set(
+  ["showBasesEnabled", "showBunkersEnabled"].map((k) => toggles.find((t) => t.key === k)?.el).filter(Boolean),
+);
+const authGatedRows = [document.getElementById("row-bases"), document.getElementById("row-bunkers")].filter(Boolean);
+let authGated = true; // assume not-approved until WARERA_OPS_AUTH_STATUS says otherwise
+
+function applyAuthGate(loggedIn) {
+  authGated = !loggedIn;
+  for (const row of authGatedRows) row.hidden = authGated;
+  updateMapCount();
+}
+
 function updateMapCount() {
   if (!mapCountEl) return;
-  const n = mapFeatureEls.filter((el) => el.checked).length;
+  const n = mapFeatureEls.filter((el) => el.checked && !(authGated && authGatedEls.has(el))).length;
   mapCountEl.textContent = `${n} on`;
   mapCountEl.hidden = n === 0;
 }
@@ -99,6 +114,7 @@ function renderAuth(status) {
     authBtn.dataset.act = "login";
   }
   authBtn.disabled = authBusy;
+  applyAuthGate(!!status.loggedIn); // hide bases/bunkers rows unless approved
 }
 
 function setNote(text, isError) {
