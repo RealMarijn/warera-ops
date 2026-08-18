@@ -5,7 +5,11 @@
   "description": "Adds extra API-powered stats (like Bounty rank) to WarEra profile pages.",
   "browser_specific_settings": {
     "gecko": {
-      "id": "warera-ops@local.extension"
+      "id": "warera-ops@local.extension",
+      "data_collection_permissions": {
+        "required": ["authenticationInfo"],
+        "optional": []
+      }
     }
   },
   "icons": {
