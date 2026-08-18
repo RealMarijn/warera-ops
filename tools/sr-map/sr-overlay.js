@@ -104,8 +104,13 @@
     }).join("");
   };
 
+  // The MAIN-world engine can't call chrome.runtime.getURL, so we resolve the
+  // badge-image base URL here and hand it over with every config message.
+  let imgBase = "";
+  try { imgBase = chrome.runtime.getURL("assets/images/"); } catch (_) {}
+
   const relay = () => {
-    window.postMessage({ __wsr: CHANNEL, kind: "config", enabled, types }, location.origin);
+    window.postMessage({ __wsr: CHANNEL, kind: "config", enabled, types, imgBase }, location.origin);
   };
   const persistTypes = () => {
     try { chrome.storage?.local.set({ srTypes: types }); } catch (_) {}

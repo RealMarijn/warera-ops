@@ -37,6 +37,10 @@
   let types = null;            // { coal:true, ... } per-type filter; null = all on
   let regions = [];            // [{ id, pos:[lng,lat], sr }]
   let lastCounts = {};
+  // Base URL for the badge images (e.g. moz-extension://<uuid>/assets/images/).
+  // This MAIN-world engine has no access to chrome.runtime.getURL, so the ISOLATED
+  // overlay (sr-overlay.js) resolves it and sends it in its "config" message.
+  let imgBase = null;
 
   // ---- tRPC (page context, auth cookies) --------------------------------
   const trpcGet = async (proc, input) => {
@@ -80,8 +84,14 @@
   };
 
   // ---- SVG overlay inside the map container -----------------------------
+  const IMG_SIZE = 26;                              // badge width/height in px
+  const XLINK = "http://www.w3.org/1999/xlink";
+  const setHref = (img, url) => {
+    img.setAttribute("href", url);
+    img.setAttributeNS(XLINK, "xlink:href", url);   // fallback for older SVG renderers
+  };
   let svg, gBadges;
-  const badges = new Map(); // regionId -> { g, region }
+  const badges = new Map(); // regionId -> { g, img, region }
 
   const mapContainer = () => {
     try { if (map && typeof map.getContainer === "function") { const c = map.getContainer(); if (c) return c; } } catch (_) {}
@@ -105,39 +115,42 @@
     container.appendChild(svg);
   };
 
+  // Each badge is an SVG <image> centred on its region, wrapped in a <g> we can
+  // translate on every map render. The <image> href is only set once we know the
+  // extension's asset base URL (imgBase), which arrives from the ISOLATED overlay.
   const makeBadge = (region) => {
     const meta = RES[region.sr];
     if (!meta) return null;
-    // const g = document.createElementNS(NS, "g");
-    // const circle = document.createElementNS(NS, "circle");
-    const div = document.createElement('div')
-    const img = document.createElement('img').setAttribute('src', chrome.runtime.getURL(`assets/images/${meta.glyph}`))
-    // circle.setAttribute("r", "9");
-    // circle.setAttribute("fill", meta.color);
-    // circle.setAttribute("stroke", "#fff");
-    // circle.setAttribute("stroke-width", "1.5");
-    // const text = document.createElementNS(NS, "text");
-    // text.setAttribute("text-anchor", "middle");
-    // text.setAttribute("dominant-baseline", "central");
-    // text.setAttribute("y", "0.5");
-    // text.setAttribute("font-family", "Saira, system-ui, sans-serif");
-    // text.setAttribute("font-size", meta.glyph.length > 1 ? "7.5" : "9.5");
-    // text.setAttribute("font-weight", "700");
-    // text.setAttribute("fill", meta.fg);
-    // // text.textContent = meta.glyph;
-    // g.append(circle, text);
-    // g.append(img)
-    div.append(img)
-    return div;
+    const g = document.createElementNS(NS, "g");
+    const img = document.createElementNS(NS, "image");
+    img.setAttribute("width", IMG_SIZE);
+    img.setAttribute("height", IMG_SIZE);
+    img.setAttribute("x", -IMG_SIZE / 2);            // centre on the region point
+    img.setAttribute("y", -IMG_SIZE / 2);
+    img.setAttribute("preserveAspectRatio", "xMidYMid meet");
+    img.style.filter = "drop-shadow(0 1px 2px rgba(0,0,0,.6))"; // legibility over the map
+    if (imgBase) setHref(img, imgBase + meta.glyph);
+    g.appendChild(img);
+    return { g, img };
   };
 
   const buildBadges = () => {
     for (const region of regions) {
-      const g = makeBadge(region);
-      if (!g) continue;
-      g.style.display = "none";
-      gBadges.appendChild(g);
-      badges.set(region.id, { g, region });
+      const b = makeBadge(region);
+      if (!b) continue;
+      b.g.style.display = "none";
+      gBadges.appendChild(b.g);
+      badges.set(region.id, { g: b.g, img: b.img, region });
+    }
+  };
+
+  // (Re)point every badge's <image> at the resolved asset base URL. Called when
+  // imgBase first arrives, which may be before or after buildBadges() has run.
+  const applyImgBase = () => {
+    if (!imgBase) return;
+    for (const { img, region } of badges.values()) {
+      const meta = RES[region.sr];
+      if (meta) setHref(img, imgBase + meta.glyph);
     }
   };
 
@@ -182,6 +195,7 @@
     if (d.kind === "config") {
       enabled = !!d.enabled;
       types = d.types || null;
+      if (d.imgBase && d.imgBase !== imgBase) { imgBase = d.imgBase; applyImgBase(); }
       draw();
     } else if (d.kind === "requestCounts") {
       window.postMessage({ __wsr: CHANNEL, kind: "counts", counts: lastCounts }, location.origin);

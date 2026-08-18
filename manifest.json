@@ -5,7 +5,11 @@
   "description": "Adds extra API-powered stats (like Bounty rank) to WarEra profile pages.",
   "browser_specific_settings": {
     "gecko": {
-      "id": "warera-ops@local.extension"
+      "id": "warera-ops@local.extension",
+      "data_collection_permissions": {
+        "required": ["authenticationInfo"],
+        "optional": []
+      }
     }
   },
   "icons": {
@@ -29,7 +33,8 @@
     "https://api3.warera.io/*",
     "https://api4.warera.io/*",
     "https://api5.warera.io/*",
-    "https://api6.warera.io/*"
+    "https://api6.warera.io/*",
+    "https://warera.realmarijn.nl/*"
   ],
   "action": {
     "default_popup": "menu.html"
@@ -41,18 +46,18 @@
   "content_scripts": [
     {
       "matches": ["https://app.warera.io/*"],
-      "js": ["browser-polyfill.js", "common.js", "rankings.js", "country-rankings.js", "mu-rankings.js", "inventory-export.js", "battle-money-totals.js", "market-order-totals.js", "account-inventory-value.js"],
+      "js": ["browser-polyfill.js", "common.js", "rankings.js", "country-rankings.js", "mu-rankings.js", "inventory-export.js", "battle-money-totals.js", "account-inventory-value.js"],
       "run_at": "document_idle"
     },
     {
       "matches": ["https://app.warera.io/*"],
-      "js": ["tools/dmg-lines/hook.js", "tools/dmg-lines/map.js", "tools/sr-map/sr-map.js"],
+      "js": ["tools/dmg-lines/hook.js", "tools/dmg-lines/map.js", "tools/sr-map/sr-map.js", "tools/base-map/base-map.js"],
       "run_at": "document_start",
       "world": "MAIN"
     },
     {
       "matches": ["https://app.warera.io/*"],
-      "js": ["tools/dmg-lines/overlay.js", "tools/sr-map/sr-overlay.js"],
+      "js": ["tools/dmg-lines/overlay.js", "tools/sr-map/sr-overlay.js", "tools/base-map/base-overlay.js"],
       "run_at": "document_start",
       "world": "ISOLATED"
     }
