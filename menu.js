@@ -1,14 +1,19 @@
 // Popup toggles. Each drives one storage key that a content-script subsystem watches:
-//   warera-ops-enabled -> the extra-stats features (common.js framework)
-//   wdlEnabled         -> the damage-lines overlay (tools/dmg-lines)
+//   warera-ops-enabled  -> the extra-stats features (common.js framework)
+//   wdlEnabled          -> the damage-lines overlay (tools/dmg-lines)
+//   coreColorsEnabled   -> the core-country-colors map mode (tools/dmg-lines/map.js)
 const toggles = [
-  { el: document.getElementById("toggle-stats"), key: "warera-ops-enabled" },
-  { el: document.getElementById("toggle-dmg"), key: "wdlEnabled" },
+  { el: document.getElementById("toggle-stats"), key: "warera-ops-enabled", defaultOn: true },
+  { el: document.getElementById("toggle-dmg"), key: "wdlEnabled", defaultOn: true },
+  // Off by default — a bigger visual change to the map than the other two, opt-in.
+  { el: document.getElementById("toggle-core-colors"), key: "coreColorsEnabled", defaultOn: false },
 ];
 
 const keys = toggles.map((t) => t.key);
 browser.storage.local.get(keys).then((v) => {
-  for (const t of toggles) t.el.checked = v[t.key] !== false; // default on
+  for (const t of toggles) {
+    t.el.checked = t.key in v ? v[t.key] === true : t.defaultOn;
+  }
 });
 
 for (const t of toggles) {
@@ -49,7 +54,48 @@ function setNote(text, isError) {
 async function refreshAuthUI() {
   const status = await browser.runtime.sendMessage({ type: "WARERA_OPS_AUTH_STATUS" });
   renderAuth(status || { loggedIn: false });
+  connRowEl.hidden = !status?.loggedIn;
+  if (status?.loggedIn) checkConnection();
 }
+
+// ── Server connection check ────────────────────────────────────────────────
+// Being logged in only proves we once had a valid token — it says nothing
+// about whether the backend is actually reachable *right now*, or whether a
+// since-revoked/de-whitelisted token would still be accepted. /api/ext/whoami
+// is cheap and requires a live, whitelist-checked bearer token, so a
+// successful call is real evidence of a working connection, not just cached
+// local state. Only shown (and only polled) while logged in — a non-
+// whitelisted user can never reach this state in the first place.
+const connRowEl = document.getElementById("conn-row");
+const connStatusEl = document.getElementById("conn-status");
+const connNameEl = document.getElementById("conn-name");
+
+let connCheckBusy = false;
+
+async function checkConnection() {
+  if (connCheckBusy) return;
+  connCheckBusy = true;
+  try {
+    await browser.runtime.sendMessage({
+      type: "WARERA_OPS_AUTHED_FETCH",
+      path: "/api/ext/whoami",
+      method: "GET",
+    });
+    connStatusEl.classList.add("on");
+    connNameEl.textContent = "Connected to server";
+  } catch (err) {
+    connStatusEl.classList.remove("on");
+    connNameEl.textContent = "Can't reach server";
+  } finally {
+    connCheckBusy = false;
+  }
+}
+
+// Popup documents are torn down (and this interval with them) as soon as the
+// popup closes, so there's nothing to clear it explicitly.
+setInterval(() => {
+  if (!connRowEl.hidden) checkConnection();
+}, 4000);
 
 const DENY_REASONS = {
   not_whitelisted: "That Discord account isn't on the WarEra Ops whitelist.",

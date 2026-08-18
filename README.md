@@ -26,9 +26,13 @@ A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats to t
   - Collapsed by default to just the two fighting countries and the region; click "Show supporting countries" to expand the full per-country damage breakdown, which scrolls and can be resized taller.
   - Close extra windows with the ✕ button (the last remaining window can't be closed).
 
+### Map
+
+- **Core country colors** (off by default) — recolors every region by its *original* owning country instead of whoever currently controls it, using the same colors WarEra's own map already uses per country. Useful for seeing at a glance how much of a country's original territory has actually been conquered.
+
 ### Extension controls
 
-- **Popup menu** (toolbar icon) — toggle Extra stats and the Damage tracker on or off independently, and, if you're on the whitelist, sign in with Discord for features that need it.
+- **Popup menu** (toolbar icon) — toggle Extra stats, the Damage tracker, and Core country colors on or off independently, and, if you're on the whitelist, sign in with Discord for features that need it.
 
 ## Installing
 

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>WarEra Ops</title>
     <style>
-      body { width: 240px; margin: 0; font-family: system-ui, sans-serif; background: #14161c; color: #e8e8ea; }
+      body { width: 320px; margin: 0; font-family: system-ui, sans-serif; background: #14161c; color: #e8e8ea; }
       .wrap { padding: 14px; }
       h1 { font-size: 14px; margin: 0 0 2px; }
       p { font-size: 11px; opacity: .65; margin: 0 0 12px; line-height: 1.4; }
@@ -30,11 +30,13 @@
       .auth-status.on .dot { background: #4ade80; box-shadow: 0 0 6px #4ade80; }
       .auth-status .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .85; }
       .auth button { font: inherit; font-size: 12px; padding: 5px 10px; border-radius: 6px; border: none;
-        cursor: pointer; background: #3a3d47; color: #e8e8ea; }
+        cursor: pointer; background: #3a3d47; color: #e8e8ea; flex: none; }
       .auth button:hover { background: #4a4d57; }
       .auth button:disabled { opacity: .5; cursor: default; }
       .auth-note { margin-top: 6px; font-size: 10px; opacity: .6; line-height: 1.4; }
       .auth-note.error { color: #ff8a8a; opacity: .9; }
+      .conn-row { margin-top: 6px; }
+      .conn-row[hidden] { display: none; }
     </style>
   </head>
   <body>
@@ -61,6 +63,16 @@
           <span class="slider"></span>
         </label>
       </div>
+      <div class="row">
+        <span class="label">
+          <span>Core country colors</span>
+          <small>Color the map by each region's original owner, not who controls it now.</small>
+        </span>
+        <label class="switch">
+          <input type="checkbox" id="toggle-core-colors" />
+          <span class="slider"></span>
+        </label>
+      </div>
       <div class="hint">Open app.warera.io to see the effect.</div>
       <div class="auth">
         <div class="auth-row">
@@ -69,6 +81,12 @@
             <span class="name" id="auth-name">Checking…</span>
           </span>
           <button id="auth-btn" disabled>…</button>
+        </div>
+        <div class="conn-row" id="conn-row" hidden>
+          <span class="auth-status" id="conn-status">
+            <span class="dot"></span>
+            <span class="name" id="conn-name">Checking…</span>
+          </span>
         </div>
         <div class="auth-note" id="auth-note"></div>
       </div>

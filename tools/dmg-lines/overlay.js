@@ -22,8 +22,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlPanel = "1.3.2"; } catch (_) {}
-  console.log("[WDL] overlay.js panel v1.3.2 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlPanel = "1.6.0"; } catch (_) {}
+  console.log("[WDL] overlay.js panel v1.6.0 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const FLAG = (code) => `https://media.warera.io/images/flags/${code}.svg?v=16`;
@@ -36,7 +36,7 @@
   };
   const MARGIN = 4;
   const GAP = 12; // px between linked panels when laid out side by side
-  const MIN_REVEAL = 220; // px the panel grows by, at minimum, whenever it's uncollapsed
+  const MIN_REVEAL = 130; // px the panel grows by, at minimum, whenever it's uncollapsed (~3 country rows)
 
   const fmt = (n) => {
     if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
@@ -63,8 +63,35 @@
   let activePanelId = null;
   let primaryPanelId = null;   // the first panel created this page load — the only one whose
                                 // position/size persists across reloads (see restore()/persist below)
-  let zTop = 2147483000;
   let panelSeq = 0;
+
+  // z-index: explicit and bounded, NOT auto. z-index:auto would let us lose gracefully to
+  // WarEra's own auto-tier floating UI (chat, dialogs), but it *also* loses — unconditionally,
+  // regardless of DOM order — to absolutely anything on the page with ANY explicit z-index, and
+  // WarEra's ordinary page chrome has some (small values, but explicit beats auto no matter the
+  // magnitude). That made our panels invisible, buried under normal page content instead of just
+  // under chat. There's no single z-index value that both beats ordinary content AND loses to
+  // auto-tier chat — those two constraints are in direct conflict per how CSS stacking works, not
+  // something tunable. So: back to an explicit value, which at least keeps panels visible above
+  // ordinary content (matches every other floating panel already on the page); the chat-specific
+  // overlap needs a different, non-z-index approach if it's worth solving.
+  // `zOrder` (back-to-front) is re-flattened onto [Z_BASE, Z_BASE+zOrder.length) on every
+  // bringToFront, so the range used can't creep upward no matter how many activations happen
+  // across a long session.
+  const Z_BASE = 5;
+  const zOrder = []; // panelIds, back-to-front
+  const restackZ = () => {
+    zOrder.forEach((id, i) => {
+      const inst = panels.get(id);
+      if (inst) inst.panelEl.style.zIndex = String(Z_BASE + i);
+    });
+  };
+  const raiseInZOrder = (panelId) => {
+    const i = zOrder.indexOf(panelId);
+    if (i !== -1) zOrder.splice(i, 1);
+    zOrder.push(panelId);
+    restackZ();
+  };
 
   const findItem = (id) => battleItems.find((b) => b.battleId === id) || null;
 
@@ -152,8 +179,6 @@
 
     .body { padding: 8px 10px 10px; flex: 1 1 auto; min-height: 0; overflow-y: auto; }
     .empty { padding: 16px 6px; text-align:center; opacity:.6; font-size:12px; line-height:1.5; }
-    .legend { display:flex; gap:12px; font-size:10px; opacity:.7; margin-bottom:8px; }
-    .legend i { display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:4px; vertical-align:middle; }
     .row { display:flex; align-items:center; gap:8px; margin:5px 0; font-size:12px; }
     .row img { width:18px; height:13px; object-fit:cover; border-radius:2px; flex:none; }
     .row .nm { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -238,7 +263,7 @@
 
       const panel = document.createElement("div");
       panel.className = "panel";
-      panel.style.zIndex = String(++zTop);
+      panel.style.zIndex = String(Z_BASE); // raiseInZOrder assigns the real value right after this returns
       panel.innerHTML = `
         <div class="hdr"><span class="dot"></span><span class="ttl">LIVE Damage tracker</span><span class="sp"></span>
           <button data-act="add" title="New tracker window">+</button>
@@ -496,10 +521,10 @@
         </div>`;
       }).join("");
       // Attacker/defender total damage rate is now shown directly on the map, next to each
-      // fighting nation's own position (see map.js) — not duplicated here.
-      els.body.innerHTML =
-        `<div class="legend"><span><i style="background:${DEF}"></i>Defender side</span>
-          <span><i style="background:${ATT}"></i>Attacker side</span></div>${rows}`;
+      // fighting nation's own position (see map.js) — not duplicated here. No legend for
+      // defender/attacker color either — the bar colors already read directly against the
+      // header's def/att colors right above.
+      els.body.innerHTML = rows;
     };
 
     // ---- position/size/visibility ------------------------------------------
@@ -531,7 +556,7 @@
     };
 
     const setActive = (on) => els.panel.classList.toggle("active", on);
-    const bringToFront = () => { els.panel.style.zIndex = String(++zTop); };
+    const bringToFront = () => raiseInZOrder(panelId);
     const setLinkButton = (linked) => {
       els.linkBtn.setAttribute("data-linked", linked ? "1" : "0");
       els.linkBtn.title = linked ? "Detach from group" : "Attach to group";
@@ -689,6 +714,11 @@
     panels.delete(panelId);
     linkedSet.delete(panelId);
     groupOffset.delete(panelId);
+    // Must actually remove (not just leave a dead entry) — zOrder.length directly determines the
+    // z-index range restackZ hands out, so a dead entry left behind would let that range creep up
+    // over many open/close cycles across a long session, same problem this scheme exists to avoid.
+    const zi = zOrder.indexOf(panelId);
+    if (zi !== -1) zOrder.splice(zi, 1);
     inst.destroy();
 
     // Both roles must move to a surviving panel — there's always at least one left, since the
@@ -739,9 +769,19 @@
     }
   };
 
+  // ---- toggle (core-country-colors map mode) --------------------------------
+  // Independent of the damage-tracker on/off above — purely relays the popup's
+  // storage toggle to the MAIN-world engine (map.js), which owns the actual
+  // map-layer logic. Defaults OFF (unlike the other toggles): it's a bigger
+  // visual change to the map, not something everyone wants on by default.
+  const relayCoreColors = (on) => {
+    window.postMessage({ __wdl: CHANNEL, kind: "coreColors", enabled: on }, location.origin);
+  };
+
   try {
     chrome.storage?.onChanged.addListener((ch) => {
       if (ch.wdlEnabled) setEnabled(ch.wdlEnabled.newValue !== false);
+      if (ch.coreColorsEnabled) relayCoreColors(ch.coreColorsEnabled.newValue === true);
     });
   } catch (_) {}
 
@@ -753,7 +793,7 @@
       // Only touch position/size if something was actually saved — otherwise the CSS default
       // (top:24px;left:24px, set above) is already correct and needs no JS repositioning,
       // so there's no flash-then-jump on a fresh install / first-ever load.
-      chrome.storage?.local.get(["wdlPos", "wdlSize", "wdlEnabled"], (v) => {
+      chrome.storage?.local.get(["wdlPos", "wdlSize", "wdlEnabled", "coreColorsEnabled"], (v) => {
         if (v.wdlPos) {
           const left = parseFloat(v.wdlPos.left), top = parseFloat(v.wdlPos.top);
           if (Number.isFinite(left) && Number.isFinite(top)) first.setPos(left, top);
@@ -761,10 +801,12 @@
         if (v.wdlSize) first.setSize(v.wdlSize.height);
         first.clamp();
         setEnabled(v.wdlEnabled !== false);
+        relayCoreColors(v.coreColorsEnabled === true);
       });
     } catch (_) {
       first.clamp();
       relayConfig();
+      relayCoreColors(false);
     }
     // The engine (map.js) needs a moment to build its country/region lookups before
     // battle.getGroupedActiveBattles is worth calling, and this whole thing runs at

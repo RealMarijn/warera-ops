@@ -33,8 +33,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlEngine = "0.9.4"; } catch (_) {}
-  console.log("[WDL] map.js engine v0.9.4 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlEngine = "0.14.0"; } catch (_) {}
+  console.log("[WDL] map.js engine v0.14.0 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const NS = "http://www.w3.org/2000/svg";
@@ -46,10 +46,29 @@
   let map = null;
   let regionPos = {};   // regionId  -> [lng,lat]
   let regionMeta = {};  // regionId  -> { name }
-  let countryPos = {};  // countryId -> [lng,lat] (homeland centroid)
+  let countryPos = {};  // countryId -> [lng,lat] (homeland centroid, largest core-territory cluster only)
   let countryMeta = {}; // countryId -> { code, name }
+  let countryRegionCount = {};   // countryId -> number of core regions (all of them, not just the main cluster)
+  let countryRankByRegionCount = []; // countryIds sorted by countryRegionCount, descending
+  let countryRankIndex = new Map();  // countryId -> its index in countryRankByRegionCount (0 = biggest)
   let ready = false;
   let enabled = true;
+
+  // ---- core-country-colors map mode --------------------------------------
+  // Colors every region by its ORIGINAL/core country (regions.initialCountryId)
+  // instead of whoever currently controls it, reusing WarEra's own per-country
+  // colors (read from the "innerCountries" source, which carries the exact
+  // same fillColor values as the "countries" source that drives normal
+  // current-ownership coloring — confirmed live, not guessed). See
+  // ensureCoreColorLayer/applyCoreColors below.
+  const CORE_LAYER_ID = "wdl-core-region-fill";
+  // Layers that show CURRENT ownership — hidden while core-colors mode is on,
+  // restored to whatever visibility they actually had (not blindly "visible":
+  // WarEra's own alliance-view toggle flips country-fill vs country-fill-alliance,
+  // and stomping that on restore would fight the game's own UI state).
+  const OWNERSHIP_LAYER_IDS = ["country-fill", "country-fill-alliance", "inner-country-fill"];
+  let coreColorsEnabled = false;   // desired state; may be set before the map/layers exist
+  let savedOwnershipVisibility = null;
 
   // battleId -> { region, meta, header, countries: Map<countryId,{side,total,events:[{t,dmg}]}> }
   const battles = new Map();
@@ -128,6 +147,103 @@
     return null;
   };
 
+  // `map` (found via findMap() above) is a react-map-gl wrapper, NOT a real
+  // maplibre-gl Map — confirmed live: it forwards read methods (getSource,
+  // project, getLayoutProperty, getLayer, ...) but has no addLayer/
+  // setLayoutProperty/addSource of its own (constructor.name is plain
+  // "Object", prototype is bare Object.prototype). It does expose .getMap(),
+  // which returns the real underlying maplibre-gl Map with the full API —
+  // used for anything beyond the wrapper's proven-safe read methods.
+  const wdlMap = () => (map && typeof map.getMap === "function") ? map.getMap() : map;
+
+  // ---- globe-mode occlusion (hide markers/lines on the far side) ----------
+  // map.project() gives NO signal about occlusion on a globe — confirmed
+  // live, a point's antipode projects to the exact same screen position as
+  // the point facing the camera dead-on. There's also no public helper for
+  // this (searched the real map's full prototype chain, found nothing
+  // globe/occlusion-related). What DOES work, confirmed live: round-tripping
+  // through unproject(project(point)) always resolves to whichever point is
+  // actually VISIBLE at that pixel — you can't click through a globe to the
+  // far side — so a big gap between the original point and the round-tripped
+  // one means the original was occluded. Confirmed live: ~0deg diff for
+  // visible points, jumping to 10+ degrees once a point crosses the true
+  // horizon. That horizon is NOT a fixed 90deg-from-center angle (MapLibre's
+  // globe camera sits at a finite, zoom-dependent distance, confirmed live
+  // by the on-screen radius peaking before 90deg and shrinking again after),
+  // which is exactly why this round-trip test is used instead of a fixed
+  // angle check — it's correct at any zoom without needing that camera math.
+  const OCCLUSION_THRESHOLD_DEG = 1;
+  // Every position in this file (countryPos/regionPos/GeoJSON `position`) is
+  // a plain [lng,lat] array, but map.unproject() returns a {lng,lat} object —
+  // normalize both to the object shape before doing the angle math, or the
+  // array side's .lat/.lng reads as undefined and the whole thing silently
+  // computes NaN (which a ">" comparison always treats as false — no error,
+  // just a check that quietly never fires).
+  const toLngLat = (p) => Array.isArray(p) ? { lng: p[0], lat: p[1] } : p;
+  const angularDiffDeg = (a, b) => {
+    const A = toLngLat(a), B = toLngLat(b);
+    const rad = Math.PI / 180;
+    const s = Math.sin(A.lat * rad) * Math.sin(B.lat * rad) +
+      Math.cos(A.lat * rad) * Math.cos(B.lat * rad) * Math.cos((A.lng - B.lng) * rad);
+    return Math.acos(Math.max(-1, Math.min(1, s))) / rad;
+  };
+  const isGlobeMode = () => {
+    try { return wdlMap().getProjection().type === "globe"; } catch (_) { return false; }
+  };
+  const isOccludedOnGlobe = (lngLat) => {
+    if (!isGlobeMode()) return false; // flat map: nothing is ever "behind" it
+    const real = wdlMap();
+    try {
+      const back = real.unproject(real.project(lngLat));
+      return angularDiffDeg(lngLat, back) > OCCLUSION_THRESHOLD_DEG;
+    } catch (_) {
+      return false; // if the check itself fails, fail open rather than hide everything
+    }
+  };
+
+  // Distance in degrees, antimeridian-aware (a naive |lngA-lngB| would treat
+  // lng=179 and lng=-179 as ~358deg apart instead of the true ~2deg — would
+  // wrongly split any country whose territory crosses the 180th meridian,
+  // e.g. Russia or Fiji, into separate clusters at that seam).
+  const CLUSTER_THRESHOLD_DEG = 20;
+  const lngLatDist = (a, b) => {
+    let dlng = a[0] - b[0];
+    if (dlng > 180) dlng -= 360; else if (dlng < -180) dlng += 360;
+    return Math.hypot(dlng, a[1] - b[1]);
+  };
+
+  // A country's core regions can include far-flung outliers (e.g. France's
+  // South American/overseas territories alongside mainland Europe) — a plain
+  // average of every position pulls the centroid to nowhere sensible in
+  // between (confirmed live: put France's flag over Libya). Union-find the
+  // positions by proximity instead, and average only the LARGEST connected
+  // cluster, so the flag lands on the country's actual main territory.
+  const clusterCentroid = (positions) => {
+    const n = positions.length;
+    if (n === 0) return null;
+    if (n === 1) return positions[0];
+    const parent = Array.from({ length: n }, (_, i) => i);
+    const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        if (lngLatDist(positions[i], positions[j]) < CLUSTER_THRESHOLD_DEG) {
+          const ri = find(i), rj = find(j);
+          if (ri !== rj) parent[ri] = rj;
+        }
+      }
+    }
+    const groups = new Map(); // root -> {x,y,n}
+    for (let i = 0; i < n; i++) {
+      const r = find(i);
+      const g = groups.get(r) || { x: 0, y: 0, n: 0 };
+      g.x += positions[i][0]; g.y += positions[i][1]; g.n++;
+      groups.set(r, g);
+    }
+    let best = null;
+    for (const g of groups.values()) if (!best || g.n > best.n) best = g;
+    return [best.x / best.n, best.y / best.n];
+  };
+
   // ---- build position/metadata lookups ----------------------------------
   const buildLookups = async () => {
     const src = map.getSource("regions");
@@ -136,23 +252,31 @@
     if (!feats.length) return false;
 
     regionPos = {};
-    const agg = {}; // initialCountryId -> {x,y,n}
+    const positionsByCountry = {}; // initialCountryId -> [[lng,lat], ...]
     for (const f of feats) {
       const p = f.properties;
       if (!p || !p.position) continue;
       if (p.regionId) regionPos[p.regionId] = p.position;
       const cid = p.initialCountryId;
       if (!cid) continue;
-      const a = (agg[cid] = agg[cid] || { x: 0, y: 0, n: 0 });
-      a.x += p.position[0]; a.y += p.position[1]; a.n++;
+      (positionsByCountry[cid] = positionsByCountry[cid] || []).push(p.position);
     }
     countryPos = {};
-    for (const cid in agg) countryPos[cid] = [agg[cid].x / agg[cid].n, agg[cid].y / agg[cid].n];
+    countryRegionCount = {};
+    for (const cid in positionsByCountry) {
+      const positions = positionsByCountry[cid];
+      const centroid = clusterCentroid(positions);
+      if (centroid) countryPos[cid] = centroid;
+      countryRegionCount[cid] = positions.length; // "size" = ALL core regions, not just the main cluster
+    }
+    countryRankByRegionCount = Object.keys(countryRegionCount)
+      .sort((a, b) => countryRegionCount[b] - countryRegionCount[a]);
+    countryRankIndex = new Map(countryRankByRegionCount.map((cid, i) => [cid, i]));
 
     countryMeta = {};
     const list = await trpcNull("country.getAllCountries");
     const arr = Array.isArray(list) ? list : Object.values(list);
-    for (const c of arr) if (c && c._id) countryMeta[c._id] = { code: c.code, name: c.name };
+    for (const c of arr) if (c && c._id) countryMeta[c._id] = { code: c.code, name: c.name, scheme: c.scheme };
 
     // Region names (for the overlay's battle header) — keyed regionId -> { name }.
     // Best-effort: a failure here just leaves headers without a region name.
@@ -163,6 +287,260 @@
       for (const id in robj) if (robj[id] && robj[id].name) regionMeta[id] = { name: robj[id].name };
     } catch (_) { /* keep whatever we had */ }
     return true;
+  };
+
+  // ---- core-country-colors map mode --------------------------------------
+  // countryId -> fillColor, read straight from the "innerCountries" source so
+  // we always match whatever palette WarEra is currently rendering with
+  // (confirmed live: identical fillColor values to the "countries" source
+  // that drives normal current-ownership coloring, just fewer/simpler
+  // features) — no hand-maintained color list to go stale. Shared by the
+  // fill layer (buildCoreColorExpression) and the flag labels (ensureCoreFlags,
+  // which tints this same color for its per-country text accent).
+  let coreColorByCountryCache = null;
+  const buildCountryColorMap = () => {
+    if (coreColorByCountryCache) return coreColorByCountryCache;
+    const src = wdlMap().getSource("innerCountries");
+    const fc = src && (src._options ? src._options.data : src._data);
+    const feats = (fc && fc.features) || [];
+    // Dedupe by countryId first — innerCountries has more features (202) than
+    // countries (confirmed live), so some countries own more than one
+    // disconnected piece there and would otherwise be recorded twice.
+    const colorByCountry = new Map();
+    for (const f of feats) {
+      const p = f.properties;
+      if (p && p.countryId && p.fillColor) colorByCountry.set(p.countryId, p.fillColor);
+    }
+
+    // A country with ZERO current territory has no feature above at all, so
+    // no color — approximate one from another country sharing the same
+    // `scheme` (a fixed hue-family attribute on country.getAllCountries,
+    // confirmed live to still be present after losing all territory, unlike
+    // fillColor which only ever exists for territory currently held). Not
+    // pixel-exact — confirmed live that a scheme usually covers 2-3 distinct
+    // shades, not one — but keeps the right hue family instead of showing
+    // black, which is what matters here.
+    const colorByScheme = new Map(); // scheme -> first color seen for it
+    for (const cid in countryMeta) {
+      const scheme = countryMeta[cid].scheme;
+      const color = colorByCountry.get(cid);
+      if (scheme && color && !colorByScheme.has(scheme)) colorByScheme.set(scheme, color);
+    }
+    for (const cid in countryMeta) {
+      if (colorByCountry.has(cid)) continue;
+      const fallback = colorByScheme.get(countryMeta[cid].scheme);
+      if (fallback) colorByCountry.set(cid, fallback);
+    }
+    coreColorByCountryCache = colorByCountry;
+    return colorByCountry;
+  };
+
+  const buildCoreColorExpression = () => {
+    const expr = ["match", ["get", "initialCountryId"]];
+    for (const [cid, color] of buildCountryColorMap()) expr.push(cid, color);
+    expr.push("rgba(0,0,0,0)"); // fallback for a region whose initialCountryId isn't in the lookup
+    return expr;
+  };
+
+  // Lightens a #rrggbb fill color into a bright per-country accent for label
+  // text — approximates WarEra's own label color (confirmed live to be a
+  // bright tint distinct from the dark region fill, e.g. rgb(148,220,186)
+  // for a country whose fill is a dark teal) by mixing toward white. Not the
+  // exact algorithm (no public source for it), just a visually-close stand-in.
+  const tintColor = (hex, amount) => {
+    const n = parseInt(hex.replace("#", ""), 16);
+    const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+    const mix = (c) => Math.round(c * (1 - amount) + 255 * amount);
+    return `rgb(${mix(r)},${mix(g)},${mix(b)})`;
+  };
+
+  // Adds the (initially hidden) fill layer if it isn't already there, reusing
+  // the existing "regions" source's real per-region polygons — no new
+  // geometry to fetch or maintain. Inserted directly at country-fill's
+  // position so it occupies the same slot in the paint order once shown.
+  //
+  // Deliberately checks *live* map state (real.getLayer(...)) rather than a
+  // remembered "already built" flag — confirmed live that WarEra's own
+  // react-map-gl app can silently wipe imperatively-added layers on a style
+  // refresh, which a boolean flag would miss (the layer's gone, the flag
+  // still says otherwise, and the next setLayoutProperty call throws
+  // "non-existing layer"). Cheap to call repeatedly (see applyCoreColors'
+  // 1s self-heal), so re-checking live is the simple, robust choice here.
+  const ensureCoreColorLayer = (real) => {
+    if (real.getLayer(CORE_LAYER_ID)) return true;
+    try {
+      real.addLayer({
+        id: CORE_LAYER_ID,
+        type: "fill",
+        source: "regions",
+        paint: { "fill-color": buildCoreColorExpression() },
+        layout: { visibility: "none" },
+      }, real.getLayer("country-fill") ? "country-fill" : undefined);
+      return true;
+    } catch (err) {
+      console.warn("[WDL] core-colors layer failed to build:", err);
+      return false;
+    }
+  };
+
+  // ---- core-colors flag markers ------------------------------------------
+  // WarEra's own on-map country flags are real DOM elements (a react-map-gl
+  // <Marker>, class "maplibregl-marker", positioned via
+  // `transform: translate(-50%,-50%) translate(Xpx,Ypx) ...` where X,Y come
+  // from map.project() on the country's CURRENT-territory centroid) —
+  // confirmed live, not a canvas symbol layer. We can't reposition WarEra's
+  // own markers (React owns them), and a fully-occupied country doesn't get
+  // one at all. So instead: hide WarEra's via CSS, and draw our own into the
+  // same SVG overlay the damage lines already use, positioned at
+  // countryPos[cid] — the CORE-territory centroid buildLookups() already
+  // computes from initialCountryId, unaffected by conquest, and already
+  // covers every country including fully-occupied ones.
+  const FLAG_URL = (code) => `https://media.warera.io/images/flags/${code}.svg?v=16`;
+  let coreFlagsBuilt = false;
+  let hideNativeFlagsStyleEl = null;
+
+  // Flag size/ratio, border-radius, font, weight and stroke below are copied
+  // from WarEra's own native marker (read live via getComputedStyle — see
+  // BACKEND_API.md-style diagnostics used to derive this): flag 19x14.25px
+  // (exactly 4:3), 2px corner radius, no shadow/filter on the flag itself;
+  // label 12px/600 'Saira, system-ui, ...', 2px solid black stroke with
+  // paint-order:stroke for legibility. Label COLOR isn't copied exactly — the
+  // native one is a bright per-country accent that doesn't match any color
+  // field we already fetch, so tintColor() approximates it from the same
+  // fillColor the region fill itself uses, rather than chasing an extra
+  // unconfirmed field for a purely cosmetic detail.
+  const FLAG_FONT = "Saira, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', " +
+    "Roboto, 'Helvetica Neue', Arial, sans-serif";
+
+  const ensureCoreFlags = () => {
+    if (coreFlagsBuilt || !gCoreFlags) return;
+    const colorByCountry = buildCountryColorMap();
+    for (const cid in countryPos) {
+      const meta = countryMeta[cid];
+      if (!meta || !meta.code) continue;
+      const g = document.createElementNS(NS, "g");
+      g.setAttribute("data-cid", cid);
+      const img = document.createElementNS(NS, "image");
+      img.setAttribute("href", FLAG_URL(meta.code));
+      img.setAttribute("width", "19");
+      img.setAttribute("height", "14.25");
+      img.setAttribute("x", "-9.5");    // center on its projected point
+      img.setAttribute("y", "-7.125");
+      img.style.borderRadius = "2px";
+      const label = document.createElementNS(NS, "text");
+      label.textContent = meta.name || "";
+      label.setAttribute("x", "0");
+      label.setAttribute("y", "17"); // just below the flag
+      label.setAttribute("text-anchor", "middle");
+      label.setAttribute("font-size", "12");
+      label.setAttribute("font-family", FLAG_FONT);
+      label.setAttribute("font-weight", "600");
+      const fillColor = colorByCountry.get(cid);
+      label.setAttribute("fill", fillColor ? tintColor(fillColor, 0.65) : "#fff");
+      label.style.paintOrder = "stroke";
+      label.style.stroke = "#000";
+      label.style.strokeWidth = "2px";
+      label.style.strokeLinejoin = "round";
+      g.appendChild(img);
+      g.appendChild(label);
+      gCoreFlags.appendChild(g);
+    }
+    coreFlagsBuilt = true;
+  };
+
+  // Showing all ~180 countries' flags at once is unreadable once zoomed out
+  // (WarEra's own map has the same problem and solves it the same way: hide
+  // smaller countries first, more of them as you zoom out further). "Size"
+  // is core region count, per the user's own description of the native
+  // behavior. Linear ramp between ZOOM_FEWEST_FLAGS (only the biggest
+  // MIN_FLAGS_SHOWN countries) and ZOOM_ALL_FLAGS (everyone shown) — approximate,
+  // tuned by eye rather than reverse-engineered from WarEra's own thresholds.
+  const ZOOM_FEWEST_FLAGS = 1;
+  const ZOOM_ALL_FLAGS = 4.5;
+  const MIN_FLAGS_SHOWN = 8;
+  const visibleFlagCount = () => {
+    const total = countryRankByRegionCount.length;
+    if (!total) return 0;
+    const zoom = map.getZoom();
+    if (zoom >= ZOOM_ALL_FLAGS) return total;
+    if (zoom <= ZOOM_FEWEST_FLAGS) return Math.min(total, MIN_FLAGS_SHOWN);
+    const frac = (zoom - ZOOM_FEWEST_FLAGS) / (ZOOM_ALL_FLAGS - ZOOM_FEWEST_FLAGS);
+    return Math.round(MIN_FLAGS_SHOWN + frac * (total - MIN_FLAGS_SHOWN));
+  };
+
+  const repositionCoreFlags = () => {
+    if (!gCoreFlags || gCoreFlags.style.display === "none") return;
+    const visibleCount = visibleFlagCount();
+    for (const g of gCoreFlags.children) {
+      const cid = g.getAttribute("data-cid");
+      const pos = countryPos[cid];
+      if (!pos) continue;
+      const rank = countryRankIndex.get(cid);
+      if (rank !== undefined && rank >= visibleCount) { g.style.display = "none"; continue; }
+      if (isOccludedOnGlobe(pos)) { g.style.display = "none"; continue; }
+      g.style.display = "";
+      const p = map.project(pos);
+      g.setAttribute("transform", `translate(${p.x},${p.y})`);
+    }
+  };
+
+  // WarEra's flag markers live outside our SVG entirely, so this can't be a
+  // layer toggle — a small injected stylesheet is the simplest way to hide
+  // them. `.maplibregl-marker` is the underlying maplibre-gl library's own
+  // class (WarEra's CSS-modules hashes rotate on redeploy, that constant
+  // won't), scoped down to flag markers specifically via :has() so no other
+  // marker type (battles, cities, ...) is affected.
+  const setNativeFlagsHidden = (hidden) => {
+    if (hidden) {
+      if (hideNativeFlagsStyleEl) return;
+      hideNativeFlagsStyleEl = document.createElement("style");
+      hideNativeFlagsStyleEl.id = "wdl-hide-native-flags";
+      hideNativeFlagsStyleEl.textContent =
+        '.maplibregl-marker:has(img[src*="/flags/"]) { display: none !important; }';
+      document.head.appendChild(hideNativeFlagsStyleEl);
+    } else if (hideNativeFlagsStyleEl) {
+      hideNativeFlagsStyleEl.remove();
+      hideNativeFlagsStyleEl = null;
+    }
+  };
+
+  // Idempotent and self-healing — safe to call any time (setCoreColorsEnabled
+  // may fire before start() has finished, and it's also called every second
+  // from the draw loop below to recover if WarEra's app wipes our layer).
+  const applyCoreColors = () => {
+    if (!map || !ready) return;
+    const real = wdlMap();
+    if (!real) return;
+    if (coreColorsEnabled) {
+      if (!ensureCoreColorLayer(real)) return; // couldn't build it — leave ownership layers alone
+      if (!savedOwnershipVisibility) {
+        savedOwnershipVisibility = {};
+        for (const id of OWNERSHIP_LAYER_IDS) {
+          savedOwnershipVisibility[id] = real.getLayoutProperty(id, "visibility") || "visible";
+        }
+      }
+      for (const id of OWNERSHIP_LAYER_IDS) real.setLayoutProperty(id, "visibility", "none");
+      real.setLayoutProperty(CORE_LAYER_ID, "visibility", "visible");
+      ensureCoreFlags();
+      gCoreFlags.style.display = "";
+      repositionCoreFlags();
+      setNativeFlagsHidden(true);
+    } else {
+      if (real.getLayer(CORE_LAYER_ID)) real.setLayoutProperty(CORE_LAYER_ID, "visibility", "none");
+      if (savedOwnershipVisibility) {
+        for (const id of OWNERSHIP_LAYER_IDS) {
+          if (real.getLayer(id)) real.setLayoutProperty(id, "visibility", savedOwnershipVisibility[id]);
+        }
+        savedOwnershipVisibility = null;
+      }
+      if (gCoreFlags) gCoreFlags.style.display = "none";
+      setNativeFlagsHidden(false);
+    }
+  };
+
+  const setCoreColorsEnabled = (on) => {
+    coreColorsEnabled = !!on;
+    applyCoreColors();
   };
 
   // ---- battle metadata (region + sides) ---------------------------------
@@ -258,7 +636,7 @@
   // the switch to a newly-active panel instant (just a display:none/'' toggle,
   // never a recompute-from-scratch). All battles' node groups paint above ALL
   // battles' arc groups (two top-level containers), same layering as before.
-  let svg, gAllArcs, gAllNodes, defsEl;
+  let svg, gAllArcs, gAllNodes, defsEl, gCoreFlags;
   const battleDraw = new Map(); // battleId -> { gArcs, gNodes, arcEls: Map<countryId,{...}> }
 
   const ensureSvg = () => {
@@ -284,10 +662,16 @@
     svg.appendChild(gAllArcs);
     gAllNodes = document.createElementNS(NS, "g"); // origin markers, painted above ALL ribbons
     svg.appendChild(gAllNodes);
+    gCoreFlags = document.createElementNS(NS, "g"); // core-country-colors flag markers, above everything else
+    gCoreFlags.style.display = "none";
+    svg.appendChild(gCoreFlags);
     // Inject INTO the map container so the lines share the map's stacking context and fall behind
     // the app UI. Fall back to a fixed full-viewport overlay only if the container is unavailable.
+    // z-index 10 (not this codebase's old go-to of "near-max-int") — WarEra's own floating chat
+    // window sits at z-index 15 (per its bundled CSS), so this needs to stay under that or a
+    // full-viewport fallback overlay would cover the chat, same reasoning as overlay.js's Z_BASE.
     const container = (map && typeof map.getContainer === "function" && map.getContainer()) || document.body;
-    if (container === document.body) { svg.style.position = "fixed"; svg.style.zIndex = "9998"; }
+    if (container === document.body) { svg.style.position = "fixed"; svg.style.zIndex = "10"; }
     container.appendChild(svg);
   };
 
@@ -362,6 +746,11 @@
       return { active: false, header: b ? b.header : null };
     }
     const tp = map.project(target);
+    // Globe mode: the region itself may be on the far side right now. Battle
+    // state (rates/totals) keeps updating either way — only the drawing is
+    // affected — so this doesn't short-circuit like the !target case above,
+    // it just feeds into `show` in draw() below.
+    const targetOccluded = isOccludedOnGlobe(target);
 
     // rank contributing countries by current rate; also sum rates per side across
     // ALL contributing countries (not just the ones with a resolved map position)
@@ -428,13 +817,24 @@
       e.halo.setAttribute("cx", cp.x); e.halo.setAttribute("cy", cp.y); e.halo.setAttribute("r", rCore * 2.5);
       e.halo.setAttribute("fill", color); e.halo.setAttribute("fill-opacity", live_ ? "0.22" : "0.08");
       e.halo.classList.toggle("wdl-live-halo", live_); // pulse only while actively dealing damage
+
+      // Globe mode: hide this one arc if ITS source is on the far side, even
+      // while the target region (and other countries' arcs) stay visible.
+      // Group-level hiding for a fully-occluded target happens in draw()
+      // (via targetOccluded below) — element-level display:none here isn't
+      // clobbered by that, since a hidden child stays hidden regardless of
+      // its parent's own display value.
+      const hideArc = targetOccluded || isOccludedOnGlobe(r.pos);
+      e.path.style.display = hideArc ? "none" : "";
+      e.halo.style.display = hideArc ? "none" : "";
+      e.core.style.display = hideArc ? "none" : "";
     }
     // remove this battle's arcs no longer shown
     for (const [cid, e] of bd.arcEls) {
       if (!live.has(cid)) { e.path.remove(); e.grad.remove(); e.halo.remove(); e.core.remove(); bd.arcEls.delete(cid); }
     }
 
-    return { active: true, header: b.header, totals, countries: shown };
+    return { active: true, header: b.header, totals, countries: shown, targetOccluded };
   };
 
   const draw = (doPost) => {
@@ -455,7 +855,7 @@
       snapshots.set(battleId, snap);
       const bd = battleDraw.get(battleId);
       if (bd) {
-        const show = enabled && snap.active && battleId === activeBattleId;
+        const show = enabled && snap.active && battleId === activeBattleId && !snap.targetOccluded;
         bd.gArcs.style.display = show ? "" : "none";
         bd.gNodes.style.display = show ? "" : "none";
       }
@@ -665,15 +1065,20 @@
     else if (d.kind === "selectBattle") selectBattle(d.panelId, d.battleId || null);
     else if (d.kind === "setActivePanel") setActivePanel(d.panelId);
     else if (d.kind === "requestBattleList") buildBattleList();
+    else if (d.kind === "coreColors") setCoreColorsEnabled(d.enabled);
   });
 
   const start = async () => {
     ensureSvg();
     try { ready = await buildLookups(); } catch (_) { ready = false; }
     if (!ready) { setTimeout(start, 1500); return; }
-    map.on("render", () => draw(false));   // reproject only
-    setInterval(() => draw(true), 1000);   // refresh rates + push summaries
+    map.on("render", () => { draw(false); repositionCoreFlags(); });   // reproject only
+    setInterval(() => {
+      draw(true);           // refresh rates + push summaries
+      if (coreColorsEnabled) applyCoreColors(); // self-heal if WarEra's app wiped our layer
+    }, 1000);
     draw(true);
+    applyCoreColors(); // picks up a toggle message that may have arrived before we were ready
   };
 
   const waitForMap = () => {
