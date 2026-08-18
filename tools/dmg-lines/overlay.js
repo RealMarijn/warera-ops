@@ -22,8 +22,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlPanel = "1.6.0"; } catch (_) {}
-  console.log("[WDL] overlay.js panel v1.6.0 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlPanel = "1.7.0"; } catch (_) {}
+  console.log("[WDL] overlay.js panel v1.7.0 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const FLAG = (code) => `https://media.warera.io/images/flags/${code}.svg?v=16`;
@@ -777,11 +777,17 @@
   const relayCoreColors = (on) => {
     window.postMessage({ __wdl: CHANNEL, kind: "coreColors", enabled: on }, location.origin);
   };
+  // Same idea, for the show-alliances map mode — see menu.js for why these
+  // two are mutually exclusive at the storage/UI level already.
+  const relayAllianceColors = (on) => {
+    window.postMessage({ __wdl: CHANNEL, kind: "allianceColors", enabled: on }, location.origin);
+  };
 
   try {
     chrome.storage?.onChanged.addListener((ch) => {
       if (ch.wdlEnabled) setEnabled(ch.wdlEnabled.newValue !== false);
       if (ch.coreColorsEnabled) relayCoreColors(ch.coreColorsEnabled.newValue === true);
+      if (ch.allianceColorsEnabled) relayAllianceColors(ch.allianceColorsEnabled.newValue === true);
     });
   } catch (_) {}
 
@@ -793,20 +799,25 @@
       // Only touch position/size if something was actually saved — otherwise the CSS default
       // (top:24px;left:24px, set above) is already correct and needs no JS repositioning,
       // so there's no flash-then-jump on a fresh install / first-ever load.
-      chrome.storage?.local.get(["wdlPos", "wdlSize", "wdlEnabled", "coreColorsEnabled"], (v) => {
-        if (v.wdlPos) {
-          const left = parseFloat(v.wdlPos.left), top = parseFloat(v.wdlPos.top);
-          if (Number.isFinite(left) && Number.isFinite(top)) first.setPos(left, top);
+      chrome.storage?.local.get(
+        ["wdlPos", "wdlSize", "wdlEnabled", "coreColorsEnabled", "allianceColorsEnabled"],
+        (v) => {
+          if (v.wdlPos) {
+            const left = parseFloat(v.wdlPos.left), top = parseFloat(v.wdlPos.top);
+            if (Number.isFinite(left) && Number.isFinite(top)) first.setPos(left, top);
+          }
+          if (v.wdlSize) first.setSize(v.wdlSize.height);
+          first.clamp();
+          setEnabled(v.wdlEnabled !== false);
+          relayCoreColors(v.coreColorsEnabled === true);
+          relayAllianceColors(v.allianceColorsEnabled === true);
         }
-        if (v.wdlSize) first.setSize(v.wdlSize.height);
-        first.clamp();
-        setEnabled(v.wdlEnabled !== false);
-        relayCoreColors(v.coreColorsEnabled === true);
-      });
+      );
     } catch (_) {
       first.clamp();
       relayConfig();
       relayCoreColors(false);
+      relayAllianceColors(false);
     }
     // The engine (map.js) needs a moment to build its country/region lookups before
     // battle.getGroupedActiveBattles is worth calling, and this whole thing runs at

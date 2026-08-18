@@ -29,10 +29,11 @@ A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats to t
 ### Map
 
 - **Core country colors** (off by default) — recolors every region by its *original* owning country instead of whoever currently controls it, using the same colors WarEra's own map already uses per country. Useful for seeing at a glance how much of a country's original territory has actually been conquered.
+- **Show alliances** (off by default) — recolors every region by its current owner's *alliance*, so allied countries read as one visual bloc. Mutually exclusive with Core country colors (only one map coloring mode at a time).
 
 ### Extension controls
 
-- **Popup menu** (toolbar icon) — toggle Extra stats, the Damage tracker, and Core country colors on or off independently, and, if you're on the whitelist, sign in with Discord for features that need it.
+- **Popup menu** (toolbar icon) — toggle Extra stats, the Damage tracker, Core country colors, and Show alliances on or off independently (the two map coloring modes turn each other off), and, if you're on the whitelist, sign in with Discord for features that need it.
 
 ## Installing
 

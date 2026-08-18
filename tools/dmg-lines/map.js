@@ -33,8 +33,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlEngine = "0.14.0"; } catch (_) {}
-  console.log("[WDL] map.js engine v0.14.0 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlEngine = "0.17.1"; } catch (_) {}
+  console.log("[WDL] map.js engine v0.17.1 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const NS = "http://www.w3.org/2000/svg";
@@ -51,6 +51,13 @@
   let countryRegionCount = {};   // countryId -> number of core regions (all of them, not just the main cluster)
   let countryRankByRegionCount = []; // countryIds sorted by countryRegionCount, descending
   let countryRankIndex = new Map();  // countryId -> its index in countryRankByRegionCount (0 = biggest)
+  // Raw per-country CURRENT-territory positions (regions.countryId, not
+  // initialCountryId) — used by the show-alliances mode, which aggregates
+  // these across every member country of an alliance to find that alliance's
+  // territory block(s). Kept as the raw list (not reduced to one centroid
+  // per country like countryPos above) since an alliance's blocks don't
+  // align with country borders.
+  let positionsByCurrentCountry = {};
   let ready = false;
   let enabled = true;
 
@@ -60,14 +67,23 @@
   // colors (read from the "innerCountries" source, which carries the exact
   // same fillColor values as the "countries" source that drives normal
   // current-ownership coloring — confirmed live, not guessed). See
-  // ensureCoreColorLayer/applyCoreColors below.
+  // ensureCoreColorLayer/applyColorMode below.
   const CORE_LAYER_ID = "wdl-core-region-fill";
-  // Layers that show CURRENT ownership — hidden while core-colors mode is on,
-  // restored to whatever visibility they actually had (not blindly "visible":
-  // WarEra's own alliance-view toggle flips country-fill vs country-fill-alliance,
-  // and stomping that on restore would fight the game's own UI state).
+  // Same idea, but colors CURRENT ownership by each country's ALLIANCE
+  // instead — see the "show-alliances map mode" section further down.
+  const ALLIANCE_LAYER_ID = "wdl-alliance-region-fill";
+  // Layers that show CURRENT ownership — hidden while either mode above is
+  // on, restored to whatever visibility they actually had (not blindly
+  // "visible": WarEra's own alliance-view toggle flips country-fill vs
+  // country-fill-alliance, and stomping that on restore would fight the
+  // game's own UI state).
   const OWNERSHIP_LAYER_IDS = ["country-fill", "country-fill-alliance", "inner-country-fill"];
-  let coreColorsEnabled = false;   // desired state; may be set before the map/layers exist
+  // Only one of these two custom coloring modes makes visual sense at a time
+  // (see menu.js — the popup already keeps them mutually exclusive), so
+  // applyColorMode() below treats "core" winning over "alliance" as a
+  // defensive tie-break only; in practice both are never true together.
+  let coreColorsEnabled = false;
+  let allianceColorsEnabled = false;
   let savedOwnershipVisibility = null;
 
   // battleId -> { region, meta, header, countries: Map<countryId,{side,total,events:[{t,dmg}]}> }
@@ -212,16 +228,34 @@
     return Math.hypot(dlng, a[1] - b[1]);
   };
 
-  // A country's core regions can include far-flung outliers (e.g. France's
-  // South American/overseas territories alongside mainland Europe) — a plain
-  // average of every position pulls the centroid to nowhere sensible in
-  // between (confirmed live: put France's flag over Libya). Union-find the
-  // positions by proximity instead, and average only the LARGEST connected
-  // cluster, so the flag lands on the country's actual main territory.
-  const clusterCentroid = (positions) => {
+  // A plain average of a set of positions can land somewhere none of them
+  // actually are — e.g. a concave or ring-shaped block averages to a point
+  // in the middle that may belong to a different country/alliance entirely
+  // (confirmed live: an alliance icon landing over a different alliance).
+  // Snapping to the real position closest to that average guarantees the
+  // marker sits on an actual region that's really part of this group.
+  const nearestPosition = (positions, target) => {
+    let best = positions[0], bestDist = Infinity;
+    for (const p of positions) {
+      const d = lngLatDist(p, target);
+      if (d < bestDist) { bestDist = d; best = p; }
+    }
+    return best;
+  };
+
+  // A country's (or alliance's) territory can include far-flung outliers
+  // (e.g. France's South American/overseas territories alongside mainland
+  // Europe) — a plain average of every position pulls the centroid to
+  // nowhere sensible in between (confirmed live: put France's flag over
+  // Libya). Union-find the positions by proximity instead. Returns every
+  // cluster found, sorted largest-first, as {pos:[lng,lat], count, positions}
+  // (positions = every point that landed in this cluster, for callers that
+  // want to spread multiple markers across a single large block — see
+  // gridSpreadPositions below).
+  const clusterAllBlocks = (positions) => {
     const n = positions.length;
-    if (n === 0) return null;
-    if (n === 1) return positions[0];
+    if (n === 0) return [];
+    if (n === 1) return [{ pos: positions[0], count: 1, positions: [positions[0]] }];
     const parent = Array.from({ length: n }, (_, i) => i);
     const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
     for (let i = 0; i < n; i++) {
@@ -232,16 +266,61 @@
         }
       }
     }
-    const groups = new Map(); // root -> {x,y,n}
+    const groups = new Map(); // root -> {x,y,n,positions}
     for (let i = 0; i < n; i++) {
       const r = find(i);
-      const g = groups.get(r) || { x: 0, y: 0, n: 0 };
+      const g = groups.get(r) || { x: 0, y: 0, n: 0, positions: [] };
       g.x += positions[i][0]; g.y += positions[i][1]; g.n++;
+      g.positions.push(positions[i]);
       groups.set(r, g);
     }
-    let best = null;
-    for (const g of groups.values()) if (!best || g.n > best.n) best = g;
-    return [best.x / best.n, best.y / best.n];
+    return Array.from(groups.values())
+      .map((g) => ({ pos: [g.x / g.n, g.y / g.n], count: g.n, positions: g.positions }))
+      .sort((a, b) => b.count - a.count);
+  };
+
+  // Spreads a block's positions into up to `targetCount` markers instead of
+  // one, so a single huge merged territory (e.g. several countries' worth of
+  // an alliance's current regions) doesn't read as one lonely icon in the
+  // middle of a big blob. Simple grid binning over the block's own bounding
+  // box — not perfectly even for oddly-shaped territory, but simple,
+  // deterministic, and good enough for "spread icons out visually".
+  const gridSpreadPositions = (positions, targetCount) => {
+    if (targetCount <= 1 || positions.length <= 1) {
+      let x = 0, y = 0;
+      for (const p of positions) { x += p[0]; y += p[1]; }
+      return [nearestPosition(positions, [x / positions.length, y / positions.length])];
+    }
+    let minLng = Infinity, maxLng = -Infinity, minLat = Infinity, maxLat = -Infinity;
+    for (const p of positions) {
+      if (p[0] < minLng) minLng = p[0]; if (p[0] > maxLng) maxLng = p[0];
+      if (p[1] < minLat) minLat = p[1]; if (p[1] > maxLat) maxLat = p[1];
+    }
+    const gridSize = Math.max(1, Math.ceil(Math.sqrt(targetCount)));
+    const cellW = (maxLng - minLng) / gridSize || 1;
+    const cellH = (maxLat - minLat) / gridSize || 1;
+    const cells = new Map(); // "col,row" -> {x,y,n,positions}
+    for (const p of positions) {
+      const col = Math.min(gridSize - 1, Math.floor((p[0] - minLng) / cellW));
+      const row = Math.min(gridSize - 1, Math.floor((p[1] - minLat) / cellH));
+      const key = col + "," + row;
+      const c = cells.get(key) || { x: 0, y: 0, n: 0, positions: [] };
+      c.x += p[0]; c.y += p[1]; c.n++;
+      c.positions.push(p);
+      cells.set(key, c);
+    }
+    // Snap each cell's average to the real position closest to it — same
+    // reasoning as the single-marker case above, per-cell.
+    return Array.from(cells.values()).map((c) => nearestPosition(c.positions, [c.x / c.n, c.y / c.n]));
+  };
+
+  // For a single position per entity (country core/current centroid) — just
+  // the largest cluster, so a flag lands on the country's actual main
+  // territory rather than a handful of far-flung outliers.
+  const clusterCentroid = (positions) => {
+    const blocks = clusterAllBlocks(positions);
+    if (!blocks.length) return null;
+    return nearestPosition(blocks[0].positions, blocks[0].pos);
   };
 
   // ---- build position/metadata lookups ----------------------------------
@@ -253,13 +332,17 @@
 
     regionPos = {};
     const positionsByCountry = {}; // initialCountryId -> [[lng,lat], ...]
+    positionsByCurrentCountry = {}; // countryId (current owner) -> [[lng,lat], ...] — module-level, see declaration
     for (const f of feats) {
       const p = f.properties;
       if (!p || !p.position) continue;
       if (p.regionId) regionPos[p.regionId] = p.position;
-      const cid = p.initialCountryId;
-      if (!cid) continue;
-      (positionsByCountry[cid] = positionsByCountry[cid] || []).push(p.position);
+      if (p.initialCountryId) {
+        (positionsByCountry[p.initialCountryId] = positionsByCountry[p.initialCountryId] || []).push(p.position);
+      }
+      if (p.countryId) {
+        (positionsByCurrentCountry[p.countryId] = positionsByCurrentCountry[p.countryId] || []).push(p.position);
+      }
     }
     countryPos = {};
     countryRegionCount = {};
@@ -297,42 +380,54 @@
   // features) — no hand-maintained color list to go stale. Shared by the
   // fill layer (buildCoreColorExpression) and the flag labels (ensureCoreFlags,
   // which tints this same color for its per-country text accent).
-  let coreColorByCountryCache = null;
-  const buildCountryColorMap = () => {
-    if (coreColorByCountryCache) return coreColorByCountryCache;
+  // scheme -> first fillColor seen for it, from countries that currently
+  // hold territory (via "innerCountries", confirmed identical to "countries"'
+  // own fillColor values, just fewer/simpler features). Shared by the core
+  // fallback below AND by the alliance mode (alliances carry the exact same
+  // scheme names, confirmed live — "sand", "red", "cyan", etc. — so this one
+  // lookup resolves colors for both without any extra data).
+  let colorBySchemeCache = null;
+  const buildColorByScheme = () => {
+    if (colorBySchemeCache) return colorBySchemeCache;
     const src = wdlMap().getSource("innerCountries");
     const fc = src && (src._options ? src._options.data : src._data);
     const feats = (fc && fc.features) || [];
-    // Dedupe by countryId first — innerCountries has more features (202) than
-    // countries (confirmed live), so some countries own more than one
-    // disconnected piece there and would otherwise be recorded twice.
-    const colorByCountry = new Map();
+    const colorByCountry = new Map(); // dedupe: innerCountries has more features (202) than countries
     for (const f of feats) {
       const p = f.properties;
       if (p && p.countryId && p.fillColor) colorByCountry.set(p.countryId, p.fillColor);
     }
-
-    // A country with ZERO current territory has no feature above at all, so
-    // no color — approximate one from another country sharing the same
-    // `scheme` (a fixed hue-family attribute on country.getAllCountries,
-    // confirmed live to still be present after losing all territory, unlike
-    // fillColor which only ever exists for territory currently held). Not
-    // pixel-exact — confirmed live that a scheme usually covers 2-3 distinct
-    // shades, not one — but keeps the right hue family instead of showing
-    // black, which is what matters here.
-    const colorByScheme = new Map(); // scheme -> first color seen for it
+    const colorByScheme = new Map();
     for (const cid in countryMeta) {
       const scheme = countryMeta[cid].scheme;
       const color = colorByCountry.get(cid);
       if (scheme && color && !colorByScheme.has(scheme)) colorByScheme.set(scheme, color);
     }
+    colorBySchemeCache = { colorByCountry, colorByScheme };
+    return colorBySchemeCache;
+  };
+
+  // countryId -> fillColor for EVERY country (including zero-territory ones,
+  // approximated via their scheme — see buildColorByScheme). Shared by the
+  // core fill layer (buildCoreColorExpression) and the flag labels
+  // (ensureCoreFlags, which tints this same color for its per-country text
+  // accent).
+  let coreColorByCountryCache = null;
+  const buildCountryColorMap = () => {
+    if (coreColorByCountryCache) return coreColorByCountryCache;
+    const { colorByCountry, colorByScheme } = buildColorByScheme();
+    const result = new Map(colorByCountry);
+    // A country with ZERO current territory has no feature/color above at
+    // all — approximate one from another country sharing the same scheme.
+    // Not pixel-exact (confirmed live a scheme usually covers 2-3 distinct
+    // shades, not one) but keeps the right hue family instead of black.
     for (const cid in countryMeta) {
-      if (colorByCountry.has(cid)) continue;
+      if (result.has(cid)) continue;
       const fallback = colorByScheme.get(countryMeta[cid].scheme);
-      if (fallback) colorByCountry.set(cid, fallback);
+      if (fallback) result.set(cid, fallback);
     }
-    coreColorByCountryCache = colorByCountry;
-    return colorByCountry;
+    coreColorByCountryCache = result;
+    return result;
   };
 
   const buildCoreColorExpression = () => {
@@ -364,7 +459,7 @@
   // react-map-gl app can silently wipe imperatively-added layers on a style
   // refresh, which a boolean flag would miss (the layer's gone, the flag
   // still says otherwise, and the next setLayoutProperty call throws
-  // "non-existing layer"). Cheap to call repeatedly (see applyCoreColors'
+  // "non-existing layer"). Cheap to call repeatedly (see applyColorMode's
   // 1s self-heal), so re-checking live is the simple, robust choice here.
   const ensureCoreColorLayer = (real) => {
     if (real.getLayer(CORE_LAYER_ID)) return true;
@@ -458,8 +553,10 @@
   const ZOOM_FEWEST_FLAGS = 1;
   const ZOOM_ALL_FLAGS = 4.5;
   const MIN_FLAGS_SHOWN = 8;
-  const visibleFlagCount = () => {
-    const total = countryRankByRegionCount.length;
+  // Takes the rank array to use (core vs current-territory ranking — see
+  // the two modes below), so both can share this same ramp logic.
+  const visibleFlagCount = (rankArray) => {
+    const total = rankArray.length;
     if (!total) return 0;
     const zoom = map.getZoom();
     if (zoom >= ZOOM_ALL_FLAGS) return total;
@@ -470,7 +567,7 @@
 
   const repositionCoreFlags = () => {
     if (!gCoreFlags || gCoreFlags.style.display === "none") return;
-    const visibleCount = visibleFlagCount();
+    const visibleCount = visibleFlagCount(countryRankByRegionCount);
     for (const g of gCoreFlags.children) {
       const cid = g.getAttribute("data-cid");
       const pos = countryPos[cid];
@@ -504,15 +601,243 @@
     }
   };
 
-  // Idempotent and self-healing — safe to call any time (setCoreColorsEnabled
-  // may fire before start() has finished, and it's also called every second
-  // from the draw loop below to recover if WarEra's app wipes our layer).
-  const applyCoreColors = () => {
+  // ---- show-alliances map mode --------------------------------------------
+  // Colors CURRENT territory (regions.countryId, not initialCountryId) by
+  // each country's alliance — "we should not grab the core regions of a
+  // country, but just use the current regions" per the user's own framing.
+  // alliance.getManyPaginated carries a `scheme` per alliance using the
+  // EXACT SAME name vocabulary as country schemes (confirmed live: "sand",
+  // "red", "cyan", ... all match known country scheme names), so
+  // buildColorByScheme() above resolves alliance colors for free — no
+  // separate palette to reverse-engineer.
+  let allianceByCountry = null; // countryId -> { allianceId, name, scheme } | fetched once, lazily
+  let allianceDataPromise = null;
+  const NEUTRAL_ALLIANCE_COLOR = "#4a4a4a"; // country not currently in any alliance
+
+  const fetchAlliances = async () => {
+    // Not routed through trpcRaw()/trpcNull() above — confirmed live that
+    // this procedure specifically needs the input wrapped as {json: {...}},
+    // unlike e.g. region.getRegionsObject which trpcRaw already handles with
+    // a plain object. Mirrors the exact request shape confirmed working.
+    const url = "https://api2.warera.io/trpc/alliance.getManyPaginated?batch=1&input=" +
+      encodeURIComponent(JSON.stringify({ 0: { json: { page: 1, limit: 100 } } }));
+    const r = await fetch(url, { credentials: "include" });
+    if (!r.ok) throw new Error("alliance.getManyPaginated " + r.status);
+    const j = await r.json();
+    const data = j[0].result.data;
+    return (data && data.json) || data || {};
+  };
+
+  let allianceById = null; // allianceId -> { name, scheme, avatarUrl }
+
+  const ensureAllianceData = () => {
+    if (allianceByCountry) return Promise.resolve(allianceByCountry);
+    if (!allianceDataPromise) {
+      allianceDataPromise = fetchAlliances().then((data) => {
+        const items = (data && data.items) || [];
+        const byCountry = new Map();
+        const byId = new Map();
+        for (const a of items) {
+          byId.set(a._id, { name: a.name, scheme: a.scheme, avatarUrl: a.avatarUrl });
+          for (const m of a.memberCountries || []) {
+            if (m.suspended || !m.country) continue;
+            byCountry.set(m.country, { allianceId: a._id, name: a.name, scheme: a.scheme });
+          }
+        }
+        allianceByCountry = byCountry;
+        allianceById = byId;
+        return byCountry;
+      }).catch((err) => {
+        console.warn("[WDL] alliance data fetch failed:", err);
+        allianceDataPromise = null; // allow retry on next attempt
+        return null;
+      });
+    }
+    return allianceDataPromise;
+  };
+
+  // countryId -> resolved alliance color, for countries currently in an
+  // alliance only (everyone else falls back to NEUTRAL_ALLIANCE_COLOR at the
+  // call sites below).
+  let allianceColorByCountryCache = null;
+  const buildAllianceColorByCountryMap = () => {
+    if (allianceColorByCountryCache) return allianceColorByCountryCache;
+    if (!allianceByCountry) return new Map();
+    const { colorByScheme } = buildColorByScheme();
+    const result = new Map();
+    for (const [cid, info] of allianceByCountry) {
+      const color = colorByScheme.get(info.scheme);
+      if (color) result.set(cid, color);
+    }
+    allianceColorByCountryCache = result;
+    return result;
+  };
+
+  const buildAllianceColorExpression = () => {
+    const expr = ["match", ["get", "countryId"]]; // CURRENT owner, not initialCountryId
+    for (const [cid, color] of buildAllianceColorByCountryMap()) expr.push(cid, color);
+    expr.push(NEUTRAL_ALLIANCE_COLOR);
+    return expr;
+  };
+
+  const ensureAllianceColorLayer = (real) => {
+    if (real.getLayer(ALLIANCE_LAYER_ID)) return true;
+    try {
+      real.addLayer({
+        id: ALLIANCE_LAYER_ID,
+        type: "fill",
+        source: "regions",
+        paint: { "fill-color": buildAllianceColorExpression() },
+        layout: { visibility: "none" },
+      }, real.getLayer("country-fill") ? "country-fill" : undefined);
+      return true;
+    } catch (err) {
+      console.warn("[WDL] alliance-colors layer failed to build:", err);
+      return false;
+    }
+  };
+
+  // One marker per DISCONNECTED territory block an alliance currently holds
+  // (not one per member country) — e.g. an alliance whose members control
+  // both a European cluster and a separate overseas cluster gets an icon on
+  // each, per the user's own request. Built from positionsByCurrentCountry
+  // (every member country's current regions, pooled together) run through
+  // the same clustering used for country flags, but keeping ALL clusters
+  // instead of just the largest.
+  let allianceBlocksByAlliance = null; // allianceId -> { blocks:[{pos,count}], totalCount }
+  let allianceRankByRegionCount = [];  // allianceIds sorted by totalCount, descending
+  let allianceRankIndex = new Map();
+
+  // Roughly one marker per this many current regions within a single
+  // connected block, so a big merged territory gets several spread-out
+  // icons instead of one lonely marker in the middle of it — capped so a
+  // huge alliance doesn't paper the whole map in its own icon.
+  const REGIONS_PER_ALLIANCE_MARKER = 12;
+  const MAX_MARKERS_PER_BLOCK = 8;
+
+  const buildAllianceBlocks = () => {
+    if (allianceBlocksByAlliance || !allianceByCountry) return allianceBlocksByAlliance;
+    const countryIdsByAlliance = new Map(); // allianceId -> [countryId, ...]
+    for (const [cid, info] of allianceByCountry) {
+      let list = countryIdsByAlliance.get(info.allianceId);
+      if (!list) { list = []; countryIdsByAlliance.set(info.allianceId, list); }
+      list.push(cid);
+    }
+    const result = new Map();
+    for (const [allianceId, countryIds] of countryIdsByAlliance) {
+      const positions = [];
+      for (const cid of countryIds) {
+        const p = positionsByCurrentCountry[cid];
+        if (p) positions.push(...p);
+      }
+      if (!positions.length) continue;
+      // Disconnected landmasses first (union-find), then spread each one
+      // into multiple markers if it's big enough to look sparse with just one.
+      const markers = [];
+      for (const block of clusterAllBlocks(positions)) {
+        const target = Math.max(1, Math.min(MAX_MARKERS_PER_BLOCK, Math.round(block.count / REGIONS_PER_ALLIANCE_MARKER)));
+        for (const pos of gridSpreadPositions(block.positions, target)) markers.push(pos);
+      }
+      result.set(allianceId, { markers, totalCount: positions.length });
+    }
+    allianceBlocksByAlliance = result;
+    allianceRankByRegionCount = Array.from(result.keys())
+      .sort((a, b) => result.get(b).totalCount - result.get(a).totalCount);
+    allianceRankIndex = new Map(allianceRankByRegionCount.map((id, i) => [id, i]));
+    return result;
+  };
+
+  // Alliance avatars are actual uploaded images (not a predictable URL like
+  // flags), so they're clipped to a circle via border-radius rather than
+  // relying on any particular aspect ratio.
+  const ALLIANCE_ICON_SIZE = 22;
+
+  let allianceMarkersBuilt = false;
+  const ensureAllianceMarkers = () => {
+    if (allianceMarkersBuilt || !gAllianceFlags || !allianceByCountry) return;
+    const blocksByAlliance = buildAllianceBlocks();
+    if (!blocksByAlliance) return;
+    const { colorByScheme } = buildColorByScheme();
+    for (const [allianceId, data] of blocksByAlliance) {
+      const info = allianceById && allianceById.get(allianceId);
+      if (!info) continue;
+      const textColor = colorByScheme.get(info.scheme);
+      data.markers.forEach((pos, markerIndex) => {
+        const g = document.createElementNS(NS, "g");
+        g.setAttribute("data-alliance-id", allianceId);
+        g.setAttribute("data-marker-index", String(markerIndex));
+        g.setAttribute("data-pos", JSON.stringify(pos));
+        if (info.avatarUrl) {
+          const img = document.createElementNS(NS, "image");
+          img.setAttribute("href", info.avatarUrl);
+          img.setAttribute("width", String(ALLIANCE_ICON_SIZE));
+          img.setAttribute("height", String(ALLIANCE_ICON_SIZE));
+          img.setAttribute("x", String(-ALLIANCE_ICON_SIZE / 2));
+          img.setAttribute("y", String(-ALLIANCE_ICON_SIZE / 2));
+          img.style.borderRadius = "50%";
+          g.appendChild(img);
+        }
+        const label = document.createElementNS(NS, "text");
+        label.textContent = info.name || "";
+        label.setAttribute("x", "0");
+        label.setAttribute("y", String(ALLIANCE_ICON_SIZE / 2 + 10));
+        label.setAttribute("text-anchor", "middle");
+        label.setAttribute("font-size", "12");
+        label.setAttribute("font-family", FLAG_FONT);
+        label.setAttribute("font-weight", "600");
+        label.setAttribute("fill", textColor ? tintColor(textColor, 0.65) : "#ddd");
+        label.style.paintOrder = "stroke";
+        label.style.stroke = "#000";
+        label.style.strokeWidth = "2px";
+        label.style.strokeLinejoin = "round";
+        g.appendChild(label);
+        gAllianceFlags.appendChild(g);
+      });
+    }
+    allianceMarkersBuilt = true;
+  };
+
+  const repositionAllianceMarkers = () => {
+    if (!gAllianceFlags || gAllianceFlags.style.display === "none") return;
+    const visibleCount = visibleFlagCount(allianceRankByRegionCount);
+    for (const g of gAllianceFlags.children) {
+      const allianceId = g.getAttribute("data-alliance-id");
+      const pos = JSON.parse(g.getAttribute("data-pos"));
+      const rank = allianceRankIndex.get(allianceId);
+      // All of an alliance's blocks share its rank — hide/show together, so
+      // a shrunk view never shows two of an alliance's three blocks.
+      if (rank !== undefined && rank >= visibleCount) { g.style.display = "none"; continue; }
+      if (isOccludedOnGlobe(pos)) { g.style.display = "none"; continue; }
+      g.style.display = "";
+      const p = map.project(pos);
+      g.setAttribute("transform", `translate(${p.x},${p.y})`);
+    }
+  };
+
+  // ---- shared dispatcher for both map-coloring modes ----------------------
+  // Idempotent and self-healing — safe to call any time (setCoreColorsEnabled/
+  // setAllianceColorsEnabled may fire before start() has finished, and it's
+  // also called every second from the draw loop below to recover if WarEra's
+  // app wipes our layer).
+  const applyColorMode = () => {
     if (!map || !ready) return;
     const real = wdlMap();
     if (!real) return;
-    if (coreColorsEnabled) {
-      if (!ensureCoreColorLayer(real)) return; // couldn't build it — leave ownership layers alone
+    const mode = coreColorsEnabled ? "core" : allianceColorsEnabled ? "alliance" : null;
+
+    if (mode === "alliance" && !allianceByCountry) {
+      // First activation: kick off the fetch and re-run once it lands. Native
+      // map stays as-is for this one round trip rather than flashing hidden
+      // and then re-shown.
+      ensureAllianceData().then(() => {
+        if (!coreColorsEnabled && allianceColorsEnabled) applyColorMode();
+      });
+      return;
+    }
+
+    if (mode) {
+      const built = mode === "core" ? ensureCoreColorLayer(real) : ensureAllianceColorLayer(real);
+      if (!built) return; // leave ownership layers alone
       if (!savedOwnershipVisibility) {
         savedOwnershipVisibility = {};
         for (const id of OWNERSHIP_LAYER_IDS) {
@@ -520,13 +845,27 @@
         }
       }
       for (const id of OWNERSHIP_LAYER_IDS) real.setLayoutProperty(id, "visibility", "none");
-      real.setLayoutProperty(CORE_LAYER_ID, "visibility", "visible");
-      ensureCoreFlags();
-      gCoreFlags.style.display = "";
-      repositionCoreFlags();
+      real.setLayoutProperty(CORE_LAYER_ID, "visibility", mode === "core" ? "visible" : "none");
+      real.setLayoutProperty(ALLIANCE_LAYER_ID, "visibility", mode === "alliance" ? "visible" : "none");
       setNativeFlagsHidden(true);
+
+      if (mode === "core") {
+        ensureCoreFlags();
+        gCoreFlags.style.display = "";
+        repositionCoreFlags();
+      } else {
+        gCoreFlags.style.display = "none";
+      }
+      if (mode === "alliance") {
+        ensureAllianceMarkers();
+        gAllianceFlags.style.display = "";
+        repositionAllianceMarkers();
+      } else {
+        gAllianceFlags.style.display = "none";
+      }
     } else {
       if (real.getLayer(CORE_LAYER_ID)) real.setLayoutProperty(CORE_LAYER_ID, "visibility", "none");
+      if (real.getLayer(ALLIANCE_LAYER_ID)) real.setLayoutProperty(ALLIANCE_LAYER_ID, "visibility", "none");
       if (savedOwnershipVisibility) {
         for (const id of OWNERSHIP_LAYER_IDS) {
           if (real.getLayer(id)) real.setLayoutProperty(id, "visibility", savedOwnershipVisibility[id]);
@@ -534,13 +873,18 @@
         savedOwnershipVisibility = null;
       }
       if (gCoreFlags) gCoreFlags.style.display = "none";
+      if (gAllianceFlags) gAllianceFlags.style.display = "none";
       setNativeFlagsHidden(false);
     }
   };
 
   const setCoreColorsEnabled = (on) => {
     coreColorsEnabled = !!on;
-    applyCoreColors();
+    applyColorMode();
+  };
+  const setAllianceColorsEnabled = (on) => {
+    allianceColorsEnabled = !!on;
+    applyColorMode();
   };
 
   // ---- battle metadata (region + sides) ---------------------------------
@@ -636,7 +980,7 @@
   // the switch to a newly-active panel instant (just a display:none/'' toggle,
   // never a recompute-from-scratch). All battles' node groups paint above ALL
   // battles' arc groups (two top-level containers), same layering as before.
-  let svg, gAllArcs, gAllNodes, defsEl, gCoreFlags;
+  let svg, gAllArcs, gAllNodes, defsEl, gCoreFlags, gAllianceFlags;
   const battleDraw = new Map(); // battleId -> { gArcs, gNodes, arcEls: Map<countryId,{...}> }
 
   const ensureSvg = () => {
@@ -665,6 +1009,9 @@
     gCoreFlags = document.createElementNS(NS, "g"); // core-country-colors flag markers, above everything else
     gCoreFlags.style.display = "none";
     svg.appendChild(gCoreFlags);
+    gAllianceFlags = document.createElementNS(NS, "g"); // show-alliances flag markers
+    gAllianceFlags.style.display = "none";
+    svg.appendChild(gAllianceFlags);
     // Inject INTO the map container so the lines share the map's stacking context and fall behind
     // the app UI. Fall back to a fixed full-viewport overlay only if the container is unavailable.
     // z-index 10 (not this codebase's old go-to of "near-max-int") — WarEra's own floating chat
@@ -1066,19 +1413,20 @@
     else if (d.kind === "setActivePanel") setActivePanel(d.panelId);
     else if (d.kind === "requestBattleList") buildBattleList();
     else if (d.kind === "coreColors") setCoreColorsEnabled(d.enabled);
+    else if (d.kind === "allianceColors") setAllianceColorsEnabled(d.enabled);
   });
 
   const start = async () => {
     ensureSvg();
     try { ready = await buildLookups(); } catch (_) { ready = false; }
     if (!ready) { setTimeout(start, 1500); return; }
-    map.on("render", () => { draw(false); repositionCoreFlags(); });   // reproject only
+    map.on("render", () => { draw(false); repositionCoreFlags(); repositionAllianceMarkers(); });   // reproject only
     setInterval(() => {
       draw(true);           // refresh rates + push summaries
-      if (coreColorsEnabled) applyCoreColors(); // self-heal if WarEra's app wiped our layer
+      if (coreColorsEnabled || allianceColorsEnabled) applyColorMode(); // self-heal if WarEra's app wiped our layer
     }, 1000);
     draw(true);
-    applyCoreColors(); // picks up a toggle message that may have arrived before we were ready
+    applyColorMode(); // picks up a toggle message that may have arrived before we were ready
   };
 
   const waitForMap = () => {
