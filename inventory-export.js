@@ -200,24 +200,89 @@
     URL.revokeObjectURL(url);
   }
 
+  // Belt-and-suspenders for the button BACKGROUND color only (text/icon color
+  // is deliberately left alone — see buildExportButton): if the visible
+  // surface actually comes from a ::before/::after pseudo-element (common in
+  // this component library's gradient buttons), inline styles on the
+  // <button> itself can never reach it — only a stylesheet rule can. Injected
+  // once.
+  // Face color (the button itself) vs. base color (the outer wrapper div,
+  // which peeks out beneath the button as the chunky "3D pressed" bottom
+  // edge) — both a shade of purple now, base darker so the depth effect
+  // stays intact instead of being flattened away.
+  const FACE_COLOR = "#7c3aed";
+  const BASE_COLOR = "#4c1d95";
+  // Craft/Dismantle's own label text isn't plain white — it's a LIGHTER tint
+  // of that button's own face color (confirmed by the user), so the text
+  // reads as "the same hue, brighter" rather than a generic neutral color.
+  // Mirrors this same hue for our purple button.
+  const TEXT_COLOR = "#ddd6fe";
+
+  function ensureButtonColorStyle() {
+    if (document.getElementById("warera-ops-export-button-style")) return;
+    const style = document.createElement("style");
+    style.id = "warera-ops-export-button-style";
+    style.textContent = `
+      [${MARKER_ATTR}] {
+        background: ${BASE_COLOR} !important;
+        background-image: none !important;
+        border-color: ${BASE_COLOR} !important;
+      }
+      [${MARKER_ATTR}] button,
+      [${MARKER_ATTR}] button::before,
+      [${MARKER_ATTR}] button::after {
+        background: ${FACE_COLOR} !important;
+        background-image: none !important;
+        border-color: ${FACE_COLOR} !important;
+        box-shadow: none !important;
+      }
+      [${MARKER_ATTR}] button,
+      [${MARKER_ATTR}] button span,
+      [${MARKER_ATTR}] button svg {
+        color: ${TEXT_COLOR} !important;
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
   function buildExportButton(referenceWrapper) {
+    ensureButtonColorStyle();
     const wrapper = referenceWrapper.cloneNode(true);
     wrapper.setAttribute(MARKER_ATTR, "true");
     // The Craft/Dismantle row lays these out with flex-grow, sized for a 2-button row — without
     // this, the clone stretches to share that space evenly and ends up padded well past its text.
     wrapper.style.flex = "0 0 auto";
     wrapper.style.width = "fit-content";
+    // The outer wrapper div (this element) is what shows through as the
+    // chunky bottom "shadow" strip beneath the button face — it kept
+    // rendering in Craft's own color until it was recolored here too.
+    wrapper.style.setProperty("background", BASE_COLOR, "important");
+    wrapper.style.setProperty("background-image", "none", "important");
+    wrapper.style.setProperty("border-color", BASE_COLOR, "important");
 
     const button = wrapper.querySelector("button");
     if (button) {
       button.style.width = "auto";
       button.style.fontSize = "85%";
+      // Distinguish from Craft/Dismantle's own colors. `background-color`
+      // alone wasn't enough — the cloned button's own class sets the
+      // `background` SHORTHAND (a gradient layered over the base color), so
+      // background-image kept showing through; reset the whole shorthand
+      // plus background-image explicitly, all !important to beat the class.
+      button.style.setProperty("background", FACE_COLOR, "important");
+      button.style.setProperty("background-image", "none", "important");
+      button.style.setProperty("border-color", FACE_COLOR, "important");
+      button.style.setProperty("box-shadow", "none", "important");
+      button.style.setProperty("color", TEXT_COLOR, "important");
     }
     const labelSpan = button?.querySelector("span.agd9b40");
     const iconHolder = button?.querySelector(".a6izou0");
 
     if (labelSpan) labelSpan.textContent = "Export JSON";
     if (iconHolder) {
+      // Same inline style Craft/Dismantle's own icons use verbatim (including
+      // their black drop-shadow) — matching it exactly rather than
+      // reinventing it is what keeps this icon visually consistent with them.
       iconHolder.innerHTML = `
         <svg style="width: 1em; overflow: visible; height: 1em; font-size: 120%; filter: drop-shadow(black 1px 1px 0px);" viewBox="0 0 24 24" fill="currentColor">
           <path d="M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z"></path>
@@ -266,7 +331,8 @@
     const buttonsRow = referenceWrapper?.parentElement;
     if (!referenceWrapper || !buttonsRow) return;
 
-    buttonsRow.appendChild(buildExportButton(referenceWrapper));
+    // Between Craft and Dismantle, not after Dismantle.
+    referenceWrapper.after(buildExportButton(referenceWrapper));
   }
 
   function scheduleInsert() {

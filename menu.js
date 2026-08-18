@@ -3,14 +3,11 @@
 //   warera-ops-enabled    -> the extra-stats features (common.js framework)
 //   wdlEnabled            -> the damage-lines overlay (tools/dmg-lines)
 //   coreColorsEnabled     -> the core-country-colors map mode (tools/dmg-lines/map.js)
-//   allianceColorsEnabled -> the show-alliances map mode (tools/dmg-lines/map.js)
 const toggles = [
   { el: document.getElementById("toggle-stats"), key: "warera-ops-enabled", defaultOn: true },
   { el: document.getElementById("toggle-dmg"), key: "wdlEnabled", defaultOn: true },
-  // Off by default — a bigger visual change to the map than the other two, opt-in.
+  // Off by default — a bigger visual change to the map than the others, opt-in.
   { el: document.getElementById("toggle-core-colors"), key: "coreColorsEnabled", defaultOn: false },
-  { el: document.getElementById("toggle-alliance-colors"), key: "allianceColorsEnabled", defaultOn: false },
-  { el: document.getElementById("toggle-sr"), key: "srMapEnabled", defaultOn: false },
   { el: document.getElementById("toggle-bases"), key: "showBasesEnabled", defaultOn: false },
   { el: document.getElementById("toggle-bunkers"), key: "showBunkersEnabled", defaultOn: false },
 ];
@@ -30,12 +27,10 @@ for (const t of toggles) {
 }
 
 // ── "Map features" collapsible group ──────────────────────────────────────
-// Strategic resources, core-country-colors and show-alliances all live under a
-// single expandable section. The header shows how many of them are on so the
-// state is visible while the group is collapsed (its default).
-const mapFeatureKeys = [
-  "srMapEnabled", "coreColorsEnabled", "allianceColorsEnabled", "showBasesEnabled", "showBunkersEnabled",
-];
+// Core-country-colors, bases and bunkers all live under a single expandable
+// section. The header shows how many of them are on so the state is visible
+// while the group is collapsed (its default).
+const mapFeatureKeys = ["coreColorsEnabled", "showBasesEnabled", "showBunkersEnabled"];
 const mapFeatureEls = mapFeatureKeys
   .map((key) => toggles.find((t) => t.key === key)?.el)
   .filter(Boolean);
@@ -72,25 +67,6 @@ if (mapBtn && mapSubmenu) {
   });
 }
 for (const el of mapFeatureEls) el.addEventListener("change", updateMapCount);
-
-// Core-country-colors and show-alliances both recolor the whole map the same
-// way (they'd fight over which one gets to hide WarEra's native coloring/
-// flags) — only one makes sense at a time, so turning one on turns the other
-// off, in both the UI and storage.
-const coreColorsToggle = toggles.find((t) => t.key === "coreColorsEnabled");
-const allianceColorsToggle = toggles.find((t) => t.key === "allianceColorsEnabled");
-coreColorsToggle.el.addEventListener("change", () => {
-  if (coreColorsToggle.el.checked && allianceColorsToggle.el.checked) {
-    allianceColorsToggle.el.checked = false;
-    browser.storage.local.set({ allianceColorsEnabled: false });
-  }
-});
-allianceColorsToggle.el.addEventListener("change", () => {
-  if (allianceColorsToggle.el.checked && coreColorsToggle.el.checked) {
-    coreColorsToggle.el.checked = false;
-    browser.storage.local.set({ coreColorsEnabled: false });
-  }
-});
 
 // ── Discord login (whitelist-gated access to our backend) ─────────────────
 // All the actual auth logic (pairing, token storage, refresh) lives in

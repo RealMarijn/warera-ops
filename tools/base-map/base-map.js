@@ -7,9 +7,9 @@
 // (region positions + names, from region.getRegionsObject) and does the join + drawing + the
 // "something new lit up" diff that drives the notification toasts.
 //
-// Same overlay technique as tools/sr-map: an SVG injected INTO the MapLibre container, reprojected
-// on every map render. This engine has no chrome.runtime access (MAIN world), so ALL backend data
-// arrives via postMessage from the ISOLATED overlay.
+// Same overlay technique as tools/dmg-lines/map.js: an SVG injected INTO the MapLibre container,
+// reprojected on every map render. This engine has no chrome.runtime access (MAIN world), so ALL
+// backend data arrives via postMessage from the ISOLATED overlay.
 //
 // Messages (discriminator __wbm: "warera-base-map"):
 //   in  { kind:"config", enabled:{bases,bunkers} }   which layers to draw (already AND-ed with login)
@@ -18,17 +18,18 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wbmEngine = "0.1.0"; } catch (_) {}
-  console.log("[WBM] base-map.js engine v0.1.0 loaded");
+  try { document.documentElement.dataset.wbmEngine = "0.4.0"; } catch (_) {}
+  console.log("[WBM] base-map.js engine v0.4.0 loaded");
 
   const CHANNEL = "warera-base-map";
   const NS = "http://www.w3.org/2000/svg";
   const LAYERS = ["bases", "bunkers"];
-  // Per-layer badge colour + label + a small horizontal offset so a region that has BOTH a base and
-  // a bunker shows two side-by-side badges instead of one on top of the other.
+  // Per-layer badge colour + label. Positioning offset (when this region also
+  // has a badge from another layer/engine) comes from badgeOffset() below,
+  // not a fixed per-layer value.
   const LAYER = {
-    bases:   { color: "#f59e0b", label: "Military base", dx: -10 },
-    bunkers: { color: "#38bdf8", label: "Bunker",        dx: 10 },
+    bases:   { color: "#f59e0b", label: "Military base" },
+    bunkers: { color: "#38bdf8", label: "Bunker" },
   };
   const RELEVANT = new Set(["a", "p"]); // active / pending — what we draw and notify on
 
@@ -52,7 +53,7 @@
     return d.json || d;
   };
 
-  // ---- find MapLibre map via React fiber (same detection as sr-map) -----
+  // ---- find MapLibre map via React fiber (same detection as dmg-lines) --
   const isMap = (o) => {
     try {
       return o && typeof o.project === "function" && typeof o.getZoom === "function" &&
@@ -80,6 +81,48 @@
       if (n.sibling) stack.push(n.sibling);
     }
     return null;
+  };
+
+  // ---- globe-mode occlusion (hide badges on the far side) ---------------
+  // Same technique as tools/dmg-lines/map.js: map.project() gives no signal
+  // about occlusion on a globe (a point's antipode projects to the same
+  // screen position as the facing point), so round-tripping through
+  // unproject(project(point)) is used instead — a big gap between the
+  // original point and the round-tripped one means it was occluded. Both
+  // project/unproject/getProjection are forwarded by the react-map-gl
+  // wrapper `map` already holds (confirmed in the dmg-lines engine), so no
+  // .getMap() unwrap is needed here.
+  const OCCLUSION_THRESHOLD_DEG = 1;
+  const toLngLat = (p) => Array.isArray(p) ? { lng: p[0], lat: p[1] } : p;
+  const angularDiffDeg = (a, b) => {
+    const A = toLngLat(a), B = toLngLat(b);
+    const rad = Math.PI / 180;
+    const s = Math.sin(A.lat * rad) * Math.sin(B.lat * rad) +
+      Math.cos(A.lat * rad) * Math.cos(B.lat * rad) * Math.cos((A.lng - B.lng) * rad);
+    return Math.acos(Math.max(-1, Math.min(1, s))) / rad;
+  };
+  const isGlobeMode = () => {
+    try { return map.getProjection().type === "globe"; } catch (_) { return false; }
+  };
+  const isOccludedOnGlobe = (lngLat) => {
+    if (!isGlobeMode()) return false;
+    try {
+      const back = map.unproject(map.project(lngLat));
+      return angularDiffDeg(lngLat, back) > OCCLUSION_THRESHOLD_DEG;
+    } catch (_) {
+      return false;
+    }
+  };
+
+  // ---- badge layout (bases + bunkers, this engine's own two layers) -----
+  // Symmetric pair centered on (0,0), so a region with BOTH a base and a
+  // bunker reads as two badges centered as a GROUP on the region rather than
+  // one badge landing dead-center and the other bumped off to a side.
+  const PAIR_OFFSET = { bases: [-10, 0], bunkers: [10, 0] };
+  let activeRegionsByLayer = { bases: new Set(), bunkers: new Set() };
+  const badgeOffset = (layer, regionId) => {
+    const other = layer === "bases" ? "bunkers" : "bases";
+    return activeRegionsByLayer[other].has(regionId) ? PAIR_OFFSET[layer] : [0, 0];
   };
 
   // ---- SVG overlay inside the map container -----------------------------
@@ -242,6 +285,7 @@
   const reconcile = () => {
     if (!ready || !gBadges) return;
     const desired = new Map(); // key -> d
+    const activeByLayer = { bases: new Set(), bunkers: new Set() };
     for (const layer of LAYERS) {
       if (!enabled[layer] || !data[layer]) continue;
       const statuses = data[layer];
@@ -253,6 +297,7 @@
         desired.set(layer + ":" + id, {
           layer, regionId: id, status: st.s, t: st.t, level: st.l, pos: geo.pos, name: geo.name || id,
         });
+        activeByLayer[layer].add(id);
       }
     }
     for (const [key, b] of badges) {
@@ -264,6 +309,7 @@
       b.d = d;
       updateBadge(b, d);
     }
+    activeRegionsByLayer = activeByLayer;
     draw();
   };
 
@@ -277,9 +323,11 @@
     const M = 24; // cull margin
     for (const b of badges.values()) {
       const d = b.d; if (!d) continue;
+      if (isOccludedOnGlobe(d.pos)) { b.g.style.display = "none"; continue; }
       const p = map.project(d.pos);
       if (p.x < -M || p.y < -M || p.x > cw + M || p.y > ch + M) { b.g.style.display = "none"; continue; }
-      b.g.setAttribute("transform", `translate(${p.x + LAYER[d.layer].dx} ${p.y})`);
+      const [ox, oy] = badgeOffset(d.layer, d.regionId);
+      b.g.setAttribute("transform", `translate(${p.x + ox} ${p.y + oy})`);
       b.g.style.display = "";
     }
   };
@@ -362,6 +410,67 @@
     regions = next;
   };
 
+  // region.getRegionsObject's `position` field is NOT reliably the visual
+  // center of the region's shape — confirmed live (e.g. Dakar): badges landed
+  // consistently off to one side, not just when paired with another badge.
+  // The real "regions" map source has the actual polygon geometry already
+  // loaded client-side (the game fetches it to draw the map itself), so
+  // compute a proper area-weighted centroid from that instead and use it in
+  // place of the position field wherever available.
+  //
+  // Shoelace-formula centroid of a single ring (array of [lng,lat] pairs).
+  const ringCentroid = (ring) => {
+    let area = 0, cx = 0, cy = 0;
+    for (let i = 0; i < ring.length - 1; i++) {
+      const [x0, y0] = ring[i], [x1, y1] = ring[i + 1];
+      const cross = x0 * y1 - x1 * y0;
+      area += cross;
+      cx += (x0 + x1) * cross;
+      cy += (y0 + y1) * cross;
+    }
+    area /= 2;
+    if (Math.abs(area) < 1e-12) {
+      // Degenerate ring — fall back to a plain vertex average.
+      let sx = 0, sy = 0;
+      for (const [x, y] of ring) { sx += x; sy += y; }
+      return { pos: [sx / ring.length, sy / ring.length], area: 0 };
+    }
+    return { pos: [cx / (6 * area), cy / (6 * area)], area: Math.abs(area) };
+  };
+  // A region's geometry can be a MultiPolygon with several disconnected parts
+  // — use the centroid of the LARGEST part by area, not an average across
+  // all of them, so a small offshore sliver doesn't drag the badge away from
+  // the main landmass.
+  const regionCentroidFromGeometry = (geometry) => {
+    if (!geometry) return null;
+    const polygons = geometry.type === "MultiPolygon" ? geometry.coordinates
+      : geometry.type === "Polygon" ? [geometry.coordinates] : null;
+    if (!polygons) return null;
+    let best = null;
+    for (const poly of polygons) {
+      const outer = poly[0];
+      if (!outer || outer.length < 4) continue;
+      const c = ringCentroid(outer);
+      if (!best || c.area > best.area) best = c;
+    }
+    return best ? best.pos : null;
+  };
+  const applyGeometryCentroids = () => {
+    try {
+      const src = map.getSource("regions");
+      const fc = src && (src._options ? src._options.data : src._data);
+      const feats = (fc && fc.features) || [];
+      for (const f of feats) {
+        const rid = f.properties && f.properties.regionId;
+        if (!rid || !regions[rid]) continue;
+        const centroid = regionCentroidFromGeometry(f.geometry);
+        if (centroid) regions[rid].pos = centroid;
+      }
+    } catch (err) {
+      console.warn("[WBM] geometry centroid computation failed, using region.getRegionsObject position instead", err);
+    }
+  };
+
   const start = async () => {
     ensureSvg();
     try {
@@ -371,6 +480,7 @@
       setTimeout(start, 3000);
       return;
     }
+    applyGeometryCentroids();
     ready = true;
     map.on("render", draw); // reproject as the map pans/zooms
     setInterval(updateCountdowns, 1000); // live-tick pending countdown labels

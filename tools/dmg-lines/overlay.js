@@ -22,8 +22,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlPanel = "1.7.0"; } catch (_) {}
-  console.log("[WDL] overlay.js panel v1.7.0 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlPanel = "1.8.1"; } catch (_) {}
+  console.log("[WDL] overlay.js panel v1.8.1 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const FLAG = (code) => `https://media.warera.io/images/flags/${code}.svg?v=16`;
@@ -561,12 +561,9 @@
       els.linkBtn.setAttribute("data-linked", linked ? "1" : "0");
       els.linkBtn.title = linked ? "Detach from group" : "Attach to group";
     };
-    // `disabled` (not just a CSS/visual state) is what actually blocks the click — that's a DOM
-    // semantic unaffected by the `all:unset` CSS reset on .hdr button, so this reliably prevents
-    // closing the last remaining window even if someone finds another way to trigger a click.
     const setCloseEnabled = (on) => {
       els.closeBtn.disabled = !on;
-      els.closeBtn.title = on ? "Close this tracker window" : "Can't close the last tracker window";
+      els.closeBtn.title = "Close this tracker window";
     };
 
     const setHostVisible = (on) => { if (host) host.style.display = on ? "" : "none"; };
@@ -703,11 +700,9 @@
     return inst;
   }
 
-  // Closing is a no-op while only one window remains — updateCloseButtons keeps every close
-  // button's disabled state in sync with panels.size, so this guard and that display state can
-  // never disagree.
+  // Closing the very last window is allowed too — the popup's "Damage tracker"
+  // toggle (off then on) respawns a fresh first panel, see setEnabled below.
   function closePanel(panelId) {
-    if (panels.size <= 1) return;
     const inst = panels.get(panelId);
     if (!inst) return;
 
@@ -721,19 +716,31 @@
     if (zi !== -1) zOrder.splice(zi, 1);
     inst.destroy();
 
-    // Both roles must move to a surviving panel — there's always at least one left, since the
-    // guard above refuses to close the last window.
-    if (primaryPanelId === panelId) primaryPanelId = panels.keys().next().value;
-    if (activePanelId === panelId) setActivePanel(panels.keys().next().value);
+    // A surviving panel takes over both roles, if there is one — otherwise
+    // there's nothing left to hand them to until setEnabled respawns one.
+    const survivor = panels.size ? panels.keys().next().value : null;
+    if (primaryPanelId === panelId) primaryPanelId = survivor;
+    if (activePanelId === panelId) {
+      if (survivor) setActivePanel(survivor);
+      else activePanelId = null;
+    }
 
     window.postMessage({ __wdl: CHANNEL, kind: "unregisterPanel", panelId }, location.origin);
     updateCloseButtons();
     persistPrimary();
+
+    // Closing the last window leaves nothing on screen — reflect that in the
+    // popup's "Damage lines" toggle rather than leaving it checked with
+    // nothing to show for it. This also drives setEnabled(false) via the
+    // storage listener below; re-checking the toggle afterward is how the
+    // user gets a first window back (see setEnabled).
+    if (!panels.size) {
+      try { chrome.storage?.local.set({ wdlEnabled: false }); } catch (_) {}
+    }
   }
 
   function updateCloseButtons() {
-    const canClose = panels.size > 1;
-    for (const inst of panels.values()) inst.setCloseEnabled(canClose);
+    for (const inst of panels.values()) inst.setCloseEnabled(true);
   }
 
   const requestBattleList = () => {
@@ -761,6 +768,13 @@
   };
   const setEnabled = (on) => {
     enabled = on;
+    // The user can close every tracker window (including the last one) via
+    // its ✕ button now — re-enabling here with zero panels left is how they
+    // get one back, same as a fresh page load's initial spawnPanel().
+    if (on && panels.size === 0) {
+      const p = spawnPanel();
+      primaryPanelId = p.panelId;
+    }
     for (const inst of panels.values()) inst.setHostVisible(on);
     relayConfig();
     if (on) {
@@ -777,17 +791,11 @@
   const relayCoreColors = (on) => {
     window.postMessage({ __wdl: CHANNEL, kind: "coreColors", enabled: on }, location.origin);
   };
-  // Same idea, for the show-alliances map mode — see menu.js for why these
-  // two are mutually exclusive at the storage/UI level already.
-  const relayAllianceColors = (on) => {
-    window.postMessage({ __wdl: CHANNEL, kind: "allianceColors", enabled: on }, location.origin);
-  };
 
   try {
     chrome.storage?.onChanged.addListener((ch) => {
       if (ch.wdlEnabled) setEnabled(ch.wdlEnabled.newValue !== false);
       if (ch.coreColorsEnabled) relayCoreColors(ch.coreColorsEnabled.newValue === true);
-      if (ch.allianceColorsEnabled) relayAllianceColors(ch.allianceColorsEnabled.newValue === true);
     });
   } catch (_) {}
 
@@ -800,7 +808,7 @@
       // (top:24px;left:24px, set above) is already correct and needs no JS repositioning,
       // so there's no flash-then-jump on a fresh install / first-ever load.
       chrome.storage?.local.get(
-        ["wdlPos", "wdlSize", "wdlEnabled", "coreColorsEnabled", "allianceColorsEnabled"],
+        ["wdlPos", "wdlSize", "wdlEnabled", "coreColorsEnabled"],
         (v) => {
           if (v.wdlPos) {
             const left = parseFloat(v.wdlPos.left), top = parseFloat(v.wdlPos.top);
@@ -810,14 +818,12 @@
           first.clamp();
           setEnabled(v.wdlEnabled !== false);
           relayCoreColors(v.coreColorsEnabled === true);
-          relayAllianceColors(v.allianceColorsEnabled === true);
         }
       );
     } catch (_) {
       first.clamp();
       relayConfig();
       relayCoreColors(false);
-      relayAllianceColors(false);
     }
     // The engine (map.js) needs a moment to build its country/region lookups before
     // battle.getGroupedActiveBattles is worth calling, and this whole thing runs at
