@@ -1,4 +1,5 @@
 // Popup toggles. Each drives one storage key that a content-script subsystem watches:
+
 //   warera-ops-enabled    -> the extra-stats features (common.js framework)
 //   wdlEnabled            -> the damage-lines overlay (tools/dmg-lines)
 //   coreColorsEnabled     -> the core-country-colors map mode (tools/dmg-lines/map.js)
@@ -9,6 +10,9 @@ const toggles = [
   // Off by default — a bigger visual change to the map than the other two, opt-in.
   { el: document.getElementById("toggle-core-colors"), key: "coreColorsEnabled", defaultOn: false },
   { el: document.getElementById("toggle-alliance-colors"), key: "allianceColorsEnabled", defaultOn: false },
+  { el: document.getElementById("toggle-sr"), key: "srMapEnabled", defaultOn: false },
+  { el: document.getElementById("toggle-bases"), key: "showBasesEnabled", defaultOn: false },
+  { el: document.getElementById("toggle-bunkers"), key: "showBunkersEnabled", defaultOn: false },
 ];
 
 const keys = toggles.map((t) => t.key);
@@ -16,6 +20,7 @@ browser.storage.local.get(keys).then((v) => {
   for (const t of toggles) {
     t.el.checked = t.key in v ? v[t.key] === true : t.defaultOn;
   }
+  updateMapCount();
 });
 
 for (const t of toggles) {
@@ -23,6 +28,50 @@ for (const t of toggles) {
     browser.storage.local.set({ [t.key]: t.el.checked });
   });
 }
+
+// ── "Map features" collapsible group ──────────────────────────────────────
+// Strategic resources, core-country-colors and show-alliances all live under a
+// single expandable section. The header shows how many of them are on so the
+// state is visible while the group is collapsed (its default).
+const mapFeatureKeys = [
+  "srMapEnabled", "coreColorsEnabled", "allianceColorsEnabled", "showBasesEnabled", "showBunkersEnabled",
+];
+const mapFeatureEls = mapFeatureKeys
+  .map((key) => toggles.find((t) => t.key === key)?.el)
+  .filter(Boolean);
+const mapBtn = document.getElementById("map-features-btn");
+const mapSubmenu = document.getElementById("map-submenu");
+const mapCountEl = document.getElementById("map-count");
+
+// Bases/bunkers pull from the whitelist-gated backend, so their menu rows only
+// exist for logged-in (approved) users. Hidden until auth resolves, and not
+// counted in the "N on" pill while hidden.
+const authGatedEls = new Set(
+  ["showBasesEnabled", "showBunkersEnabled"].map((k) => toggles.find((t) => t.key === k)?.el).filter(Boolean),
+);
+const authGatedRows = [document.getElementById("row-bases"), document.getElementById("row-bunkers")].filter(Boolean);
+let authGated = true; // assume not-approved until WARERA_OPS_AUTH_STATUS says otherwise
+
+function applyAuthGate(loggedIn) {
+  authGated = !loggedIn;
+  for (const row of authGatedRows) row.hidden = authGated;
+  updateMapCount();
+}
+
+function updateMapCount() {
+  if (!mapCountEl) return;
+  const n = mapFeatureEls.filter((el) => el.checked && !(authGated && authGatedEls.has(el))).length;
+  mapCountEl.textContent = `${n} on`;
+  mapCountEl.hidden = n === 0;
+}
+
+if (mapBtn && mapSubmenu) {
+  mapBtn.addEventListener("click", () => {
+    const open = mapSubmenu.classList.toggle("open");
+    mapBtn.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+}
+for (const el of mapFeatureEls) el.addEventListener("change", updateMapCount);
 
 // Core-country-colors and show-alliances both recolor the whole map the same
 // way (they'd fight over which one gets to hide WarEra's native coloring/
@@ -65,6 +114,7 @@ function renderAuth(status) {
     authBtn.dataset.act = "login";
   }
   authBtn.disabled = authBusy;
+  applyAuthGate(!!status.loggedIn); // hide bases/bunkers rows unless approved
 }
 
 function setNote(text, isError) {
