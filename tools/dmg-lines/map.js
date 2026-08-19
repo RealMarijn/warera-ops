@@ -33,8 +33,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlEngine = "0.23.0"; } catch (_) {}
-  console.log("[WDL] map.js engine v0.23.0 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlEngine = "0.24.0"; } catch (_) {}
+  console.log("[WDL] map.js engine v0.24.0 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const NS = "http://www.w3.org/2000/svg";
@@ -93,6 +93,11 @@
   // drawCountry()) instead of any tracker panel. See the countryPanels declaration further down for
   // per-window "by country" state.
   let activeCountryPanelId = null;
+  // wdlCountryEnabled — independent of `enabled` (wdlEnabled, the tracker windows' own toggle): the
+  // "Country damage" feature must keep working (windows visible, lines drawable, polling running)
+  // regardless of whether any tracker window is open/enabled, and vice versa. Set via the
+  // "countryConfig" message, separate from "config" (which only ever touches `enabled`).
+  let countryEnabled = true;
 
   const userCountry = new Map();     // userId -> countryId | null (null = resolving)
   const pendingByUser = new Map();   // userId -> [{battleId, side, dmg, t}]
@@ -1296,7 +1301,7 @@
     const p = activeCountryPanelId ? countryPanels.get(activeCountryPanelId) : null;
     const sel = p ? p.sel : null;
     const origin = sel && countryPos[sel];
-    if (!enabled || !origin) {
+    if (!countryEnabled || !origin) {
       gCountryArcs.style.display = "none";
       if (gCountryNodes) gCountryNodes.style.display = "none";
       return;
@@ -1577,8 +1582,15 @@
     if (!d || d.__wdl !== CHANNEL) return;
     if (d.kind === "lasthit") onLastHit(d, "tap");
     else if (d.kind === "config") {
+      // wdlEnabled — the tracker windows' own toggle. Deliberately does NOT touch anything
+      // "by country" (see the separate "countryConfig" message) — the two features are independent.
       enabled = d.enabled !== false;
-      if (!enabled) {
+      draw(true);
+    }
+    else if (d.kind === "countryConfig") {
+      // wdlCountryEnabled — independent of `enabled` above, see countryEnabled's declaration.
+      countryEnabled = d.enabled !== false;
+      if (!countryEnabled) {
         for (const id of countryPanels.keys()) stopCountryTimers(id);
         if (countryIndexTimer) { clearInterval(countryIndexTimer); countryIndexTimer = null; }
       } else {

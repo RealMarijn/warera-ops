@@ -22,8 +22,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlPanel = "1.11.0"; } catch (_) {}
-  console.log("[WDL] overlay.js panel v1.11.0 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlPanel = "1.12.0"; } catch (_) {}
+  console.log("[WDL] overlay.js panel v1.12.0 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const FLAG = (code) => `https://media.warera.io/images/flags/${code}.svg?v=16`;
@@ -819,10 +819,6 @@
   const relayConfig = () => {
     window.postMessage({ __wdl: CHANNEL, kind: "config", enabled }, location.origin);
   };
-  // Country windows are visible only when BOTH the overall tracker toggle AND their own dedicated
-  // toggle are on — either one turning off hides them all (see setCountryPanelsVisible for what
-  // that also clears).
-  const ccVisibleNow = () => enabled && countryFeatureEnabled;
   const setEnabled = (on) => {
     enabled = on;
     // The user can close every tracker window (including the last one) via
@@ -833,13 +829,27 @@
       primaryPanelId = p.panelId;
     }
     for (const inst of panels.values()) inst.setHostVisible(on);
-    setCountryPanelsVisible(ccVisibleNow());
     relayConfig();
     if (on) {
       for (const inst of panels.values()) inst.clamp(); // saved position mustn't leave a panel off-screen
       if (!listRequested) requestBattleList();
-      requestCountryList();
     }
+  };
+
+  // ---- toggle (country damage on/off) ---------------------------------------
+  // Fully independent of setEnabled/wdlEnabled above — closing every tracker window auto-disables
+  // wdlEnabled (see closePanel), and that must NOT cascade into hiding the country windows too, nor
+  // should wdlEnabled being off ever block turning country damage on. Mirrors setEnabled's own
+  // shape (respawn-on-zero, relay a config message to the engine) but as its own independent toggle.
+  const ccVisibleNow = () => countryFeatureEnabled;
+  const relayCountryConfig = () => {
+    window.postMessage({ __wdl: CHANNEL, kind: "countryConfig", enabled: countryFeatureEnabled }, location.origin);
+  };
+  const setCountryFeatureEnabled = (on) => {
+    countryFeatureEnabled = on;
+    setCountryPanelsVisible(on);
+    relayCountryConfig();
+    if (on) requestCountryList();
   };
 
   // ---- toggle (core-country-colors map mode) --------------------------------
@@ -855,10 +865,7 @@
     chrome.storage?.onChanged.addListener((ch) => {
       if (ch.wdlEnabled) setEnabled(ch.wdlEnabled.newValue !== false);
       if (ch.coreColorsEnabled) relayCoreColors(ch.coreColorsEnabled.newValue === true);
-      if (ch.wdlCountryEnabled) {
-        countryFeatureEnabled = ch.wdlCountryEnabled.newValue !== false;
-        setCountryPanelsVisible(ccVisibleNow());
-      }
+      if (ch.wdlCountryEnabled) setCountryFeatureEnabled(ch.wdlCountryEnabled.newValue !== false);
     });
   } catch (_) {}
 
@@ -1280,17 +1287,17 @@
 
     // Closing the last country window leaves nothing on screen — reflect that in the popup's
     // "Country damage" toggle, same as closing the last LIVE tracker window turns off "Damage
-    // lines". Re-checking it there is how the user gets a first window back (see setCountryPanelsVisible).
+    // lines". Re-checking it there is how the user gets a first window back (see setCountryFeatureEnabled).
     if (!countryPanels.size) {
-      countryFeatureEnabled = false;
+      setCountryFeatureEnabled(false); // no-op on the (now-empty) countryPanels, just flips the flag + relays
       try { chrome.storage?.local.set({ wdlCountryEnabled: false }); } catch (_) {}
     }
   }
 
-  // Shows/hides every open country window together (driven by wdlEnabled AND wdlCountryEnabled —
-  // see ccVisibleNow). Mirrors setEnabled's tracker-panel handling: respawns a first window when
-  // turning on from zero, and hands "active" back to a tracker panel (plus clears every window's
-  // selection) when turning off.
+  // Shows/hides every open country window together (driven by wdlCountryEnabled alone — see
+  // setCountryFeatureEnabled/ccVisibleNow; independent of the tracker windows' wdlEnabled). Mirrors
+  // setEnabled's tracker-panel handling: respawns a first window when turning on from zero, and
+  // hands "active" back to a tracker panel (plus clears every window's selection) when turning off.
   const setCountryPanelsVisible = (on) => {
     if (on && countryPanels.size === 0) spawnCountryPanel();
     for (const inst of countryPanels.values()) inst.setHostVisible(on);
@@ -1332,14 +1339,16 @@
           // group. Redo it now so they start out properly aligned/adjacent instead of only fixing
           // itself the first time the user drags something.
           layoutSideBySide();
-          countryFeatureEnabled = v.wdlCountryEnabled !== false; // read before setEnabled -> setCountryPanelsVisible
+          // Independent toggles — order between them doesn't matter (see setCountryFeatureEnabled).
           setEnabled(v.wdlEnabled !== false);
+          setCountryFeatureEnabled(v.wdlCountryEnabled !== false);
           relayCoreColors(v.coreColorsEnabled === true);
         }
       );
     } catch (_) {
       first.clamp();
       relayConfig();
+      relayCountryConfig();
       relayCoreColors(false);
     }
     // The engine (map.js) needs a moment to build its country/region lookups before
@@ -1347,13 +1356,15 @@
     // document_start — very early — so the first attempt can occasionally come back empty
     // (page/session not fully settled yet). First shot after a short delay, then a safety-net
     // retry a bit later, only if the list is still empty by then. (The country combo also
-    // re-requests every time it's opened — see ccOpenCombo — but this retry still matters for
+    // re-requests every time it's opened — see openCombo — but this retry still matters for
     // the map lines' own country-label lookups, which don't get that same on-open nudge.)
-    setTimeout(() => { if (enabled) { requestBattleList(); requestCountryList(); } }, 1500);
     setTimeout(() => {
-      if (!enabled) return;
-      if (!battleItems.length) requestBattleList();
-      if (!ccCountries.length) requestCountryList();
+      if (enabled) requestBattleList();
+      if (countryFeatureEnabled) requestCountryList();
+    }, 1500);
+    setTimeout(() => {
+      if (enabled && !battleItems.length) requestBattleList();
+      if (countryFeatureEnabled && !ccCountries.length) requestCountryList();
     }, 4000);
   };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
