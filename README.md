@@ -4,6 +4,27 @@
 
 A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats, a live battle damage tracker, and map overlays (bases, bunkers, resistance, core country colors) to the [WarEra](https://app.warera.io) browser game — mostly pulled from WarEra's own public API, with a few whitelist-gated features backed by a companion server — styled to match the game's own UI.
 
+## Table of contents
+
+- [Screenshots](#screenshots)
+- [Features](#features)
+  - [Profile & inventory](#profile--inventory)
+  - [Country & MU](#country--mu)
+  - [Battles](#battles)
+  - [Map](#map)
+  - [Extension controls](#extension-controls)
+- [Signing in with Discord](#signing-in-with-discord)
+- [Installing](#installing)
+  - [1. Download it](#1-download-it)
+  - [2. Load it in Chrome (or Edge, Brave, and other Chromium browsers)](#2-load-it-in-chrome-or-edge-brave-and-other-chromium-browsers)
+  - [3. Load it in Firefox](#3-load-it-in-firefox)
+
+## Screenshots
+
+<img src="docs/screenshots/damage-tracker-country.png" alt="LIVE Damage tracker showing where one country is dealing damage in battles" width="100%">
+
+<img src="docs/screenshots/damage-tracker-battle.png" alt="LIVE Damage tracker showing where the damage in a battle is coming from" width="100%">
+
 ## Features
 
 ### Profile & inventory
@@ -24,7 +45,7 @@ A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats, a l
   - Pick any active battle from a searchable dropdown (favourites, your country, with orders, allies, enemies, etc.) — you don't need the battle page open to watch it.
   - Open several tracker windows at once (**+** button) to watch multiple battles side by side. They're linked by default — drag one and they all move together; detach one (⛓ button) to reposition it independently, and reattach it later. Whichever window you clicked last is the "active" one; only its lines are drawn on the map, so the map doesn't get cluttered with every open battle at once.
   - Collapsed by default to just the two fighting countries and the region; click "Show supporting countries" to expand the full per-country damage breakdown, which scrolls and can be resized taller.
-  - Close extra windows with the ✕ button (the last remaining window can't be closed).
+  - Close windows with the ✕ button; closing the last one turns the "Damage lines" toggle off in the popup, so re-enabling it there spawns a fresh window.
 
 ### Map
 
@@ -33,6 +54,24 @@ A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats, a l
 ### Extension controls
 
 - **Popup menu** (toolbar icon) — toggle Extra stats, the Damage tracker, and Core country colors on or off independently, and, if you're on the whitelist, sign in with Discord for features that need it.
+
+## Signing in with Discord
+
+A few features need data that isn't in WarEra's own public API, so they're served by a small companion server instead and gated to a Discord whitelist:
+
+- Military base, bunker, and resistance icons on the map
+- Daily/Weekly/Monthly Tax Revenue tiles on country pages
+
+Everything else in this extension (profile/country/MU/battle stats, the damage tracker, core country colors) works without signing in.
+
+To sign in:
+
+1. Open the popup (click the WarEra Ops icon in your toolbar) and scroll to the bottom.
+2. Click **Login with Discord**. A new tab opens to complete the Discord login.
+3. If your Discord account is on the whitelist, the popup shows "Logged in as &lt;your name&gt;" and the gated rows (Military bases / Bunkers / Resistance under Map features, and the tax tiles on country pages) become available.
+4. If it isn't, you'll see "That Discord account isn't on the WarEra Ops whitelist." — reach out to **RealMarijn** in-game or on Discord to request access.
+
+Click **Logout** in the popup at any time to sign out again; that immediately revokes the session on the server. See the [Privacy Policy](https://warera.realmarijn.nl/privacy) for exactly what's stored on each side.
 
 ## Installing
 
