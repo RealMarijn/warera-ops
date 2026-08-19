@@ -33,8 +33,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlEngine = "0.20.0"; } catch (_) {}
-  console.log("[WDL] map.js engine v0.20.0 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlEngine = "0.23.0"; } catch (_) {}
+  console.log("[WDL] map.js engine v0.23.0 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const NS = "http://www.w3.org/2000/svg";
@@ -88,6 +88,11 @@
   const panelBattle = new Map();
   // Which panel's battle is currently drawn on the map. Whichever window the user clicked last.
   let activePanelId = null;
+  // Mutually exclusive with activePanelId's tracker-battle lines: the panelId of whichever "Country
+  // damage" window was last clicked (or null), in which case IT is what draws lines on the map (see
+  // drawCountry()) instead of any tracker panel. See the countryPanels declaration further down for
+  // per-window "by country" state.
+  let activeCountryPanelId = null;
 
   const userCountry = new Map();     // userId -> countryId | null (null = resolving)
   const pendingByUser = new Map();   // userId -> [{battleId, side, dmg, t}]
@@ -684,22 +689,56 @@
   // damage even in battles it isn't a belligerent of. Two refresh tiers keep the cost sane:
   //   - fast (10s): re-poll only the battles where the country is attacker/defender (cheap, a few).
   //   - full (30s): re-poll ALL active battles to (re)discover merc/ally involvement (~1 call each).
-  // The active-battle index (region + the two side countries per battle) is rebuilt less often still.
+  // The active-battle index (region + the two side countries per battle) is SHARED across every open
+  // "Country damage" window (one 90s timer, not one per window) since it's not country-specific —
+  // it's just "what battles currently exist". Everything else (selection, poll results, the
+  // Total/Now display preference) is tracked PER WINDOW in `countryPanels`, so several windows can
+  // watch different countries at once; only whichever one is "active" (activeCountryPanelId, see
+  // above) actually draws lines on the map — same mutual exclusivity as the tracker panels.
   const COUNTRY_COLOR = "#ffcc44";
   const COUNTRY_FAST_MS = 10000;
   const COUNTRY_FULL_MS = 30000;
   const COUNTRY_INDEX_MS = 90000;
   const RANK_CONCURRENCY = 6;    // cap simultaneous ranking fetches during a scan
   let gCountryArcs, gCountryNodes;
-  const countryArcEls = new Map();      // battleId -> { path, grad, s0, s1 }
-  let countryNode = null;               // { halo, core } origin marker at the selected country
-  let countrySel = null;                // selected countryId, or null (mode off)
-  const countryTargets = new Map();     // battleId -> { region, damage } (only where damage > 0)
+  const countryArcEls = new Map();      // battleId -> { path, grad, s0, s1 } — pooled, reused for
+                                         // whichever window is currently active (drawCountry() below
+                                         // rebuilds this from that window's own targets every call)
+  let countryNode = null;               // { halo, core } origin marker at the active window's country
   const PULSE_MS = 5000;                // how long a line pulses after its battle's damage changes
-  const countryPrevDmg = new Map();     // battleId -> last-seen damage (to detect a change)
-  const countryPulseUntil = new Map();  // battleId -> timestamp until which its line pulses
-  const activeBattleIndex = new Map();  // battleId -> { region, att, def }
-  let countryFastTimer = null, countryFullTimer = null, countryIndexTimer = null;
+  const activeBattleIndex = new Map();  // battleId -> { region, att, def } — SHARED, see above
+  let countryIndexTimer = null;
+
+  // panelId -> per-window "by country" state. battleRanking.getRanking only ever returns a battle's
+  // CUMULATIVE damage total (all-time, no time-range param exists on this endpoint) — "total" shows
+  // that raw total as-is; "now" is built client-side by remembering each battle's raw total at the
+  // moment "Now" was (re)clicked and subtracting it from the current raw total — a manual, exact
+  // zero-point rather than a rolling clock window (a "last hour"/"last minute" rolling window was
+  // tried and dropped: with only a 10-30s poll cadence it reads as inaccurate/laggy right after
+  // switching to it, since there's no way to backfill damage that happened before we started polling).
+  const countryPanels = new Map();
+  // Each entry: {
+  //   sel: countryId|null,
+  //   window: "total"|"now",
+  //   nowBaseline: Map<battleId,rawDmg>|null,
+  //   targets: Map<battleId,{region,damage}>,  // WINDOWED, damage>0 entries only
+  //   prevDmg: Map<battleId,rawDmg>,            // RAW — pulse-detection source + the "now" baseline
+  //   pulseUntil: Map<battleId,ts>,
+  //   nextFullAt: number,                       // drives that window's own refresh countdown
+  //   fastTimer, fullTimer,
+  // }
+  const ensureCountryPanel = (panelId) => {
+    let p = countryPanels.get(panelId);
+    if (!p) {
+      p = {
+        sel: null, window: "total", nowBaseline: null,
+        targets: new Map(), prevDmg: new Map(), pulseUntil: new Map(),
+        nextFullAt: 0, fastTimer: null, fullTimer: null,
+      };
+      countryPanels.set(panelId, p);
+    }
+    return p;
+  };
 
   const ensureSvg = () => {
     if (svg) return;
@@ -1053,7 +1092,7 @@
     for (const id of [...activeBattleIndex.keys()]) if (!ids.has(id)) activeBattleIndex.delete(id);
   };
 
-  // The selected country's damage in one battle (merged ranking lists every country on both sides).
+  // A window's country's damage in one battle (merged ranking lists every country on both sides).
   const fetchCountryDamage = async (battleId, cid) => {
     try {
       const d = await trpcRaw("battleRanking.getRanking", { battleId, type: "country", dataType: "damage", side: "merged" });
@@ -1063,59 +1102,111 @@
     } catch (_) { return 0; }
   };
 
-  const applyScan = (sel, results) => {
-    if (sel !== countrySel) return; // selection changed mid-scan — drop stale results
+  // Turns a battle's RAW (all-time cumulative) damage into whatever that window's currently
+  // selected display window wants to show: the raw total as-is, or (in "now" mode) the raw total
+  // minus whatever it was at the moment "Now" was last clicked (see p.nowBaseline).
+  const windowedDamage = (p, battleId, rawDmg) => {
+    if (p.window !== "now") return rawDmg;
+    const base = p.nowBaseline ? (p.nowBaseline.get(battleId) || 0) : 0;
+    return Math.max(0, rawDmg - base);
+  };
+
+  // Rebuilds a window's targets from its last known RAW per-battle totals (p.prevDmg) under its
+  // current display window — used to give instant feedback when the user switches Total/Now,
+  // without waiting for the next scan.
+  const recomputeCountryPanelTargets = (p) => {
+    for (const [id, rawDmg] of p.prevDmg) {
+      const idx = activeBattleIndex.get(id);
+      if (!idx) { p.targets.delete(id); continue; }
+      const shown = windowedDamage(p, id, rawDmg);
+      if (shown > 0) p.targets.set(id, { region: idx.region, damage: shown });
+      else p.targets.delete(id);
+    }
+  };
+
+  const applyCountryScan = (panelId, sel, results) => {
+    const p = countryPanels.get(panelId);
+    if (!p || p.sel !== sel) return; // window closed, or its selection changed mid-scan
     const now = Date.now();
     let pulsed = false;
     for (const { id, dmg } of results) {
       const idx = activeBattleIndex.get(id);
       if (dmg > 0 && idx) {
-        const prev = countryPrevDmg.get(id);
-        countryTargets.set(id, { region: idx.region, damage: dmg });
-        // Pulse only on a real increase from a known previous value — not on first discovery
-        // (that would flash every line at once and mean nothing).
-        if (prev !== undefined && dmg > prev) { countryPulseUntil.set(id, now + PULSE_MS); pulsed = true; }
-        countryPrevDmg.set(id, dmg);
+        const prev = p.prevDmg.get(id);
+        const shown = windowedDamage(p, id, dmg);
+        if (shown > 0) p.targets.set(id, { region: idx.region, damage: shown });
+        else p.targets.delete(id);
+        // Pulse only on a real RAW increase from a known previous value (a genuine new hit) — not
+        // on first discovery, and not tied to the displayed window ("now" can otherwise look like
+        // it's not pulsing right after a reset, since the RAW total is what actually changed).
+        if (prev !== undefined && dmg > prev) { p.pulseUntil.set(id, now + PULSE_MS); pulsed = true; }
+        p.prevDmg.set(id, dmg);
       } else {
-        countryTargets.delete(id);
-        countryPrevDmg.delete(id);
-        countryPulseUntil.delete(id);
+        p.targets.delete(id);
+        p.prevDmg.delete(id);
+        p.pulseUntil.delete(id);
       }
     }
-    drawCountry();
-    postCountrySummary();
+    if (panelId === activeCountryPanelId) drawCountry();
+    postCountrySummary(panelId);
     // The map may be idle (no render frames) — make sure the pulse class gets cleared after 5s.
-    if (pulsed) setTimeout(() => { if (sel === countrySel) drawCountry(); }, PULSE_MS + 150);
+    if (pulsed) setTimeout(() => { if (panelId === activeCountryPanelId && countryPanels.get(panelId) === p) drawCountry(); }, PULSE_MS + 150);
   };
 
-  const countryFullScan = async () => {
-    const sel = countrySel;
-    if (!sel) return;
+  const countryFullScan = async (panelId) => {
+    const p = countryPanels.get(panelId);
+    if (!p || !p.sel) return;
+    const sel = p.sel;
     const ids = [...activeBattleIndex.keys()];
     const results = await mapLimit(ids, RANK_CONCURRENCY, async (id) => ({ id, dmg: await fetchCountryDamage(id, sel) }));
-    applyScan(sel, results);
+    applyCountryScan(panelId, sel, results);
   };
 
-  const countryFastScan = async () => {
-    const sel = countrySel;
-    if (!sel) return;
+  const countryFastScan = async (panelId) => {
+    const p = countryPanels.get(panelId);
+    if (!p || !p.sel) return;
+    const sel = p.sel;
     const ids = [...activeBattleIndex.entries()].filter(([, idx]) => idx.att === sel || idx.def === sel).map(([id]) => id);
     const results = await mapLimit(ids, RANK_CONCURRENCY, async (id) => ({ id, dmg: await fetchCountryDamage(id, sel) }));
-    applyScan(sel, results);
+    applyCountryScan(panelId, sel, results);
   };
 
-  const stopCountryTimers = () => {
-    for (const t of [countryFastTimer, countryFullTimer, countryIndexTimer]) if (t) clearInterval(t);
-    countryFastTimer = countryFullTimer = countryIndexTimer = null;
+  const stopCountryTimers = (panelId) => {
+    const p = countryPanels.get(panelId);
+    if (!p) return;
+    if (p.fastTimer) clearInterval(p.fastTimer);
+    if (p.fullTimer) clearInterval(p.fullTimer);
+    p.fastTimer = p.fullTimer = null;
   };
-  const startCountryTimers = async () => {
-    stopCountryTimers();
-    await buildActiveBattleIndex();
-    if (!countrySel) return; // deselected while the index built
-    countryFullScan();
-    countryFastTimer = setInterval(countryFastScan, COUNTRY_FAST_MS);
-    countryFullTimer = setInterval(countryFullScan, COUNTRY_FULL_MS);
-    countryIndexTimer = setInterval(async () => { await buildActiveBattleIndex(); }, COUNTRY_INDEX_MS);
+
+  // The shared active-battle index only needs to run while at least one window has a country
+  // selected — started/stopped as windows gain/lose a selection, not tied to any one of them.
+  const anyCountrySelected = () => { for (const p of countryPanels.values()) if (p.sel) return true; return false; };
+  const ensureCountryIndexTimer = () => {
+    if (countryIndexTimer) return;
+    countryIndexTimer = setInterval(buildActiveBattleIndex, COUNTRY_INDEX_MS);
+  };
+  const stopCountryIndexTimerIfIdle = () => {
+    if (anyCountrySelected()) return;
+    if (countryIndexTimer) { clearInterval(countryIndexTimer); countryIndexTimer = null; }
+  };
+
+  const startCountryTimers = async (panelId) => {
+    stopCountryTimers(panelId);
+    ensureCountryIndexTimer();
+    // Only force a fresh build if we've never had one — otherwise trust the shared 90s timer to
+    // stay reasonably current (avoids re-doing an ~80-battle fan-out every time another window
+    // picks a country while one is already being watched).
+    if (!activeBattleIndex.size) await buildActiveBattleIndex();
+    const p = countryPanels.get(panelId);
+    if (!p || !p.sel) return; // window closed or deselected while the index built
+    p.nextFullAt = Date.now() + COUNTRY_FULL_MS;
+    countryFullScan(panelId);
+    p.fastTimer = setInterval(() => countryFastScan(panelId), COUNTRY_FAST_MS);
+    p.fullTimer = setInterval(() => {
+      p.nextFullAt = Date.now() + COUNTRY_FULL_MS;
+      countryFullScan(panelId);
+    }, COUNTRY_FULL_MS);
   };
 
   const sendCountryList = () => {
@@ -1126,29 +1217,63 @@
     window.postMessage({ __wdl: CHANNEL, kind: "countryList", countries }, location.origin);
   };
 
-  const postCountrySummary = () => {
-    const targets = countrySel
-      ? [...countryTargets.entries()]
+  const postCountrySummary = (panelId) => {
+    const p = countryPanels.get(panelId);
+    const sel = p ? p.sel : null;
+    const targets = sel
+      ? [...p.targets.entries()]
           .map(([, t]) => ({ regionName: (regionMeta[t.region] && regionMeta[t.region].name) || null, damage: t.damage }))
           .sort((a, b) => b.damage - a.damage)
       : [];
     window.postMessage({
-      __wdl: CHANNEL, kind: "countrySummary",
-      countryId: countrySel,
-      name: countrySel ? ((countryMeta[countrySel] && countryMeta[countrySel].name) || "?") : null,
+      __wdl: CHANNEL, kind: "countrySummary", panelId,
+      countryId: sel,
+      name: sel ? ((countryMeta[sel] && countryMeta[sel].name) || "?") : null,
       targets, total: targets.reduce((s, t) => s + t.damage, 0),
+      nextUpdateAt: sel ? p.nextFullAt : 0,
     }, location.origin);
   };
 
-  const selectCountry = (cid) => {
-    countrySel = cid || null;
-    countryTargets.clear();
-    countryPrevDmg.clear();
-    countryPulseUntil.clear();
-    drawCountry();
-    postCountrySummary();
-    if (countrySel) startCountryTimers();
-    else stopCountryTimers();
+  // win: "total" | "now". "now" (re)captures a fresh zero-point every time it's selected —
+  // including re-clicking it while already on "now" — from the RAW totals that window currently
+  // knows about, so it always means "damage dealt since I last clicked this button".
+  const selectCountryWindow = (panelId, win) => {
+    if (win !== "total" && win !== "now") return;
+    const p = countryPanels.get(panelId);
+    if (!p) return;
+    p.window = win;
+    if (win === "now") p.nowBaseline = new Map(p.prevDmg);
+    recomputeCountryPanelTargets(p);
+    if (panelId === activeCountryPanelId) drawCountry();
+    postCountrySummary(panelId);
+  };
+
+  const selectCountry = (panelId, cid) => {
+    const p = ensureCountryPanel(panelId);
+    p.sel = cid || null;
+    p.targets.clear();
+    p.prevDmg.clear();
+    p.pulseUntil.clear();
+    p.nowBaseline = null;
+    p.nextFullAt = 0;
+    // Deliberately NOT resetting p.window — switching countries in the same window keeps whatever
+    // time-window view was selected, same as any other display preference.
+    if (panelId === activeCountryPanelId) drawCountry();
+    postCountrySummary(panelId);
+    if (p.sel) startCountryTimers(panelId);
+    else { stopCountryTimers(panelId); stopCountryIndexTimerIfIdle(); }
+  };
+
+  // A "Country damage" window was closed — stop tracking it entirely (unlike selectCountry(id,
+  // null), which just clears the selection but keeps the window's own preferences around).
+  const unregisterCountryPanel = (panelId) => {
+    stopCountryTimers(panelId);
+    countryPanels.delete(panelId);
+    stopCountryIndexTimerIfIdle();
+    // Overlay always reassigns activeCountryPanelId (to a survivor or a tracker panel) before/after
+    // this when the closed one was active, so this is just a defensive fallback against dangling.
+    if (activeCountryPanelId === panelId) activeCountryPanelId = null;
+    draw(true);
   };
 
   const makeCountryArc = (battleId) => {
@@ -1168,7 +1293,9 @@
 
   const drawCountry = () => {
     if (!gCountryArcs) return;
-    const origin = countrySel && countryPos[countrySel];
+    const p = activeCountryPanelId ? countryPanels.get(activeCountryPanelId) : null;
+    const sel = p ? p.sel : null;
+    const origin = sel && countryPos[sel];
     if (!enabled || !origin) {
       gCountryArcs.style.display = "none";
       if (gCountryNodes) gCountryNodes.style.display = "none";
@@ -1178,7 +1305,7 @@
     gCountryNodes.style.display = "";
     const op = map.project(origin);
     const originOcc = isOccludedOnGlobe(origin);
-    const entries = [...countryTargets.entries()];
+    const entries = [...p.targets.entries()];
     const maxD = Math.max(1, ...entries.map(([, t]) => t.damage));
     const live = new Set();
     for (const [battleId, t] of entries) {
@@ -1195,12 +1322,12 @@
       e.s0.setAttribute("stop-color", COUNTRY_COLOR); e.s0.setAttribute("stop-opacity", "0.30");
       e.s1.setAttribute("stop-color", COUNTRY_COLOR); e.s1.setAttribute("stop-opacity", "0.95");
       e.path.style.display = (originOcc || isOccludedOnGlobe(rp)) ? "none" : "";
-      e.path.classList.toggle("wdl-cpulse", (countryPulseUntil.get(battleId) || 0) > Date.now());
+      e.path.classList.toggle("wdl-cpulse", (p.pulseUntil.get(battleId) || 0) > Date.now());
     }
     for (const [battleId, e] of countryArcEls) {
       if (!live.has(battleId)) { e.path.remove(); e.grad.remove(); countryArcEls.delete(battleId); }
     }
-    // origin node at the selected country
+    // origin node at the active window's country
     if (!countryNode) {
       const halo = document.createElementNS(NS, "circle"); halo.setAttribute("stroke", "none");
       halo.setAttribute("fill", COUNTRY_COLOR); halo.setAttribute("fill-opacity", "0.22");
@@ -1398,7 +1525,17 @@
   const setActivePanel = (panelId) => {
     registerPanel(panelId);
     activePanelId = panelId;
+    activeCountryPanelId = null; // a tracker panel becoming active always takes over from any country window
     draw(true); // swap SVG visibility immediately — no waiting on the next tick
+  };
+
+  // A "Country damage" window was clicked — it becomes the thing drawing lines on the map instead
+  // of whichever tracker panel was active (activePanelId=null suppresses every tracker battle's
+  // lines, see the activeBattleId computation in draw()).
+  const setActiveCountryPanel = (panelId) => {
+    activePanelId = null;
+    activeCountryPanelId = panelId;
+    draw(true);
   };
 
   const buildBattleList = async () => {
@@ -1441,16 +1578,24 @@
     if (d.kind === "lasthit") onLastHit(d, "tap");
     else if (d.kind === "config") {
       enabled = d.enabled !== false;
-      if (!enabled) stopCountryTimers(); else if (countrySel) startCountryTimers();
+      if (!enabled) {
+        for (const id of countryPanels.keys()) stopCountryTimers(id);
+        if (countryIndexTimer) { clearInterval(countryIndexTimer); countryIndexTimer = null; }
+      } else {
+        for (const [id, p] of countryPanels) if (p.sel) startCountryTimers(id);
+      }
       draw(true);
     }
     else if (d.kind === "registerPanel") registerPanel(d.panelId);
     else if (d.kind === "unregisterPanel") unregisterPanel(d.panelId);
     else if (d.kind === "selectBattle") selectBattle(d.panelId, d.battleId || null);
     else if (d.kind === "setActivePanel") setActivePanel(d.panelId);
+    else if (d.kind === "setCountryActive") setActiveCountryPanel(d.panelId);
     else if (d.kind === "requestBattleList") buildBattleList();
     else if (d.kind === "requestCountryList") sendCountryList();
-    else if (d.kind === "selectCountry") selectCountry(d.countryId || null);
+    else if (d.kind === "unregisterCountryPanel") unregisterCountryPanel(d.panelId);
+    else if (d.kind === "selectCountry") selectCountry(d.panelId, d.countryId || null);
+    else if (d.kind === "selectCountryWindow") selectCountryWindow(d.panelId, d.window);
     else if (d.kind === "coreColors") setCoreColorsEnabled(d.enabled);
   });
 

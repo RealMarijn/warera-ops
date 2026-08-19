@@ -2,10 +2,12 @@
 
 //   warera-ops-enabled    -> the extra-stats features (common.js framework)
 //   wdlEnabled            -> the damage-lines overlay (tools/dmg-lines)
+//   wdlCountryEnabled     -> the "Country damage" card (tools/dmg-lines), independent of wdlEnabled
 //   coreColorsEnabled     -> the core-country-colors map mode (tools/dmg-lines/map.js)
 const toggles = [
   { el: document.getElementById("toggle-stats"), key: "warera-ops-enabled", defaultOn: true },
   { el: document.getElementById("toggle-dmg"), key: "wdlEnabled", defaultOn: true },
+  { el: document.getElementById("toggle-country-dmg"), key: "wdlCountryEnabled", defaultOn: true },
   // Off by default — a bigger visual change to the map than the others, opt-in.
   { el: document.getElementById("toggle-core-colors"), key: "coreColorsEnabled", defaultOn: false },
   { el: document.getElementById("toggle-sr"), key: "srMapEnabled", defaultOn: false },

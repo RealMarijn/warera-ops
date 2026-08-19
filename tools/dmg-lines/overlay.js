@@ -22,8 +22,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlPanel = "1.8.1"; } catch (_) {}
-  console.log("[WDL] overlay.js panel v1.8.1 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlPanel = "1.11.0"; } catch (_) {}
+  console.log("[WDL] overlay.js panel v1.11.0 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const FLAG = (code) => `https://media.warera.io/images/flags/${code}.svg?v=16`;
@@ -50,11 +50,21 @@
 
   // ---- shared (cross-panel) state ----------------------------------------
   let enabled = true;
+  let countryFeatureEnabled = true; // wdlCountryEnabled — the "Country damage" card's own on/off,
+                                     // independent of the tracker windows' wdlEnabled toggle above
   let battleItems = [];   // last battleList payload — shared, one fetch serves every panel's picker
   let listRequested = false;
   const panels = new Map();   // panelId -> panel instance
-  const linkedSet = new Set(); // panelIds currently in the linked group (moved together)
-  // Each linked panel's offset from the group anchor, fixed at layout time (spawn/attach) and
+  // "Country damage" windows (see near the bottom of this file) live in their own registry —
+  // countryPanels — but participate in the SAME linked-group dragging/layout machinery as the
+  // tracker panels above (linkedSet/groupOffset/layoutSideBySide/makeDraggable) via instOf(), which
+  // resolves either kind of panelId to a common minimal interface (getRect/getPos/setPos/clamp/
+  // setLinkButton/setActive/bringToFront/panelEl). The two registries use distinct id prefixes
+  // ("p" vs "cp"), so there's no collision risk in sharing lookups this way.
+  const countryPanels = new Map(); // panelId -> country-panel instance
+  const instOf = (id) => countryPanels.get(id) || panels.get(id);
+  const linkedSet = new Set(); // panelIds (tracker + country) currently in the linked group (moved together)
+  // Each linked member's offset from the group anchor, fixed at layout time (spawn/attach) and
   // NOT re-derived from on-screen position during a drag — see makeDraggable for why: screen
   // position gets clamped at the viewport edge, and if a panel's offset were re-read from its
   // (possibly already-clamped-to-the-edge) rect, dragging back away from the edge would have
@@ -79,10 +89,10 @@
   // bringToFront, so the range used can't creep upward no matter how many activations happen
   // across a long session.
   const Z_BASE = 5;
-  const zOrder = []; // panelIds, back-to-front
+  const zOrder = []; // panelIds (tracker + country), back-to-front
   const restackZ = () => {
     zOrder.forEach((id, i) => {
-      const inst = panels.get(id);
+      const inst = instOf(id);
       if (inst) inst.panelEl.style.zIndex = String(Z_BASE + i);
     });
   };
@@ -187,30 +197,54 @@
     .bar { height:3px; border-radius:2px; margin-top:2px; }
   `;
 
+  // ---- shared position clamping ---------------------------------------------
+  // Keeps an element within the viewport (with a small margin), only touching its position if it's
+  // actually out of bounds. Used by every panel-like thing (tracker panels AND the country card) —
+  // factored out here so both share the exact same edge behavior.
+  const clampEl = (el) => {
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    if (!r.width) return;
+    const maxLeft = Math.max(MARGIN, window.innerWidth - r.width - MARGIN);
+    const maxTop = Math.max(MARGIN, window.innerHeight - r.height - MARGIN);
+    const left = Math.min(Math.max(MARGIN, r.left), maxLeft);
+    const top = Math.min(Math.max(MARGIN, r.top), maxTop);
+    if (Math.round(left) !== Math.round(r.left) || Math.round(top) !== Math.round(r.top)) {
+      el.style.left = left + "px"; el.style.top = top + "px";
+      el.style.right = "auto"; el.style.bottom = "auto";
+    }
+  };
+
   // ---- group layout --------------------------------------------------------
-  // Positions every linked panel left-to-right, starting from the first (anchor) panel's
-  // current top-left. Called whenever the group's membership changes (spawn, attach).
+  // Positions every linked member (tracker panels + the country card, if linked) left-to-right,
+  // starting from the first (anchor) member's current top-left, then clamps the whole row back
+  // on-screen. Called whenever the group's membership changes (spawn, attach).
   const layoutSideBySide = () => {
     const ids = [...linkedSet];
     if (!ids.length) return;
-    const anchor = panels.get(ids[0]);
+    const anchor = instOf(ids[0]);
     if (!anchor) return;
     const { left: anchorLeft, top: anchorTop } = anchor.getPos();
     let left = anchorLeft;
     for (const id of ids) {
-      const inst = panels.get(id);
+      const inst = instOf(id);
       if (!inst) continue;
       inst.setPos(left, anchorTop);
       groupOffset.set(id, { dx: left - anchorLeft, dy: 0 });
       left += inst.getRect().width + GAP;
     }
+    for (const id of ids) instOf(id)?.clamp();
   };
 
-  const setLinked = (panelId, linked) => {
-    if (linked) linkedSet.add(panelId); else { linkedSet.delete(panelId); groupOffset.delete(panelId); }
-    const inst = panels.get(panelId);
+  const setLinked = (id, linked) => {
+    if (linked) linkedSet.add(id); else { linkedSet.delete(id); groupOffset.delete(id); }
+    const inst = instOf(id);
     if (inst) inst.setLinkButton(linked);
-    if (linked) layoutSideBySide();
+    // Re-flow the group either way: attaching adds a member at the end of the row, and detaching
+    // closes the gap left behind — the remaining linked members slide together instead of staying
+    // spread out around where the detached one used to be. The detached member itself isn't in
+    // `ids` anymore (removed above), so its own position is left untouched.
+    layoutSideBySide();
   };
 
   const persistPrimary = () => {
@@ -228,19 +262,27 @@
     } catch (_) {}
   };
 
+  // panelId may be a real tracker panelId OR a country-window panelId — "active" is a single,
+  // mutually exclusive concept across both registries: whichever was clicked last is what draws
+  // lines on the map (see map.js's activeBattleId / activeCountryPanelId), and gets the
+  // highlighted border here.
   const setActivePanel = (panelId) => {
     if (activePanelId === panelId) {
       // Still bring it to front — clicking an already-active panel shouldn't be a no-op
       // if something else has since been raised above it.
-      panels.get(panelId)?.bringToFront();
+      instOf(panelId)?.bringToFront();
       return;
     }
     const prev = activePanelId;
     activePanelId = panelId;
-    if (prev) panels.get(prev)?.setActive(false);
-    const inst = panels.get(panelId);
+    if (prev) instOf(prev)?.setActive(false);
+    const inst = instOf(panelId);
     if (inst) { inst.setActive(true); inst.bringToFront(); }
-    window.postMessage({ __wdl: CHANNEL, kind: "setActivePanel", panelId }, location.origin);
+    if (countryPanels.has(panelId)) {
+      window.postMessage({ __wdl: CHANNEL, kind: "setCountryActive", panelId }, location.origin);
+    } else {
+      window.postMessage({ __wdl: CHANNEL, kind: "setActivePanel", panelId }, location.origin);
+    }
   };
 
   // ---- panel factory ---------------------------------------------------------------
@@ -532,17 +574,7 @@
     // it's actually out of bounds, so it doesn't disturb the default anchoring.
     const clamp = () => {
       if (!els || !host || host.style.display === "none") return;
-      const p = els.panel;
-      const r = p.getBoundingClientRect();
-      if (!r.width) return;
-      const maxLeft = Math.max(MARGIN, window.innerWidth - r.width - MARGIN);
-      const maxTop = Math.max(MARGIN, window.innerHeight - r.height - MARGIN);
-      const left = Math.min(Math.max(MARGIN, r.left), maxLeft);
-      const top = Math.min(Math.max(MARGIN, r.top), maxTop);
-      if (Math.round(left) !== Math.round(r.left) || Math.round(top) !== Math.round(r.top)) {
-        p.style.left = left + "px"; p.style.top = top + "px";
-        p.style.right = "auto"; p.style.bottom = "auto";
-      }
+      clampEl(els.panel);
     };
 
     const getRect = () => els.panel.getBoundingClientRect();
@@ -590,6 +622,9 @@
   // ---- dragging / resizing (group-aware) -------------------------------------
   const clampAxis = (v, size, viewportSize) => Math.min(Math.max(MARGIN, v), Math.max(MARGIN, viewportSize - size - MARGIN));
 
+  // panelId may be a real tracker panelId OR a country-window panelId — instOf() resolves either
+  // to a common getRect/getPos/setPos interface, so a country window can be dragged (and can drag
+  // its linked group along with it) exactly like a tracker panel.
   function makeDraggable(panelId, handle) {
     let dragging = false;
     let startMouseX, startMouseY;
@@ -597,7 +632,7 @@
     let followers = null;    // Map<panelId, {dx, dy, w, h}> other linked panels, offset relative to the dragged one
 
     handle.addEventListener("mousedown", (e) => {
-      const inst = panels.get(panelId);
+      const inst = instOf(panelId);
       if (!inst) return;
       dragging = true;
       startMouseX = e.clientX; startMouseY = e.clientY;
@@ -613,7 +648,7 @@
         const myOffset = groupOffset.get(panelId) || { dx: 0, dy: 0 };
         for (const id of linkedSet) {
           if (id === panelId) continue;
-          const other = panels.get(id);
+          const other = instOf(id);
           const off = groupOffset.get(id);
           if (!other || !off) continue;
           const or = other.getRect();
@@ -628,7 +663,7 @@
 
       const draggedLeft = clampAxis(draggedStart.left + dx, draggedStart.w, window.innerWidth);
       const draggedTop = clampAxis(draggedStart.top + dy, draggedStart.h, window.innerHeight);
-      panels.get(panelId)?.setPos(draggedLeft, draggedTop);
+      instOf(panelId)?.setPos(draggedLeft, draggedTop);
 
       // Each follower sticks to the edge (via its own clamp) while draggedLeft/Top + its fixed
       // offset would still be off-screen, and snaps directly to its correct spot the moment that
@@ -636,7 +671,7 @@
       // target position is always computed fresh from the dragged panel's actual position, not
       // from wherever it last happened to render.
       for (const [id, f] of followers) {
-        const inst = panels.get(id);
+        const inst = instOf(id);
         if (!inst) continue;
         const left = clampAxis(draggedLeft + f.dx, f.w, window.innerWidth);
         const top = clampAxis(draggedTop + f.dy, f.h, window.innerHeight);
@@ -649,11 +684,14 @@
       draggedStart = null;
       followers = null;
       persistPrimary();
-      ccSnapToNearestTracker(); // keep the country card parked next to the nearest tracker
     });
   }
-  // Re-clamp every panel on viewport resize so a shrinking window can't leave any panel off-screen.
-  window.addEventListener("resize", () => { for (const inst of panels.values()) inst.clamp(); ccSnapToNearestTracker(); });
+  // Re-clamp every panel (tracker AND country windows) on viewport resize so a shrinking window
+  // can't leave anything off-screen.
+  window.addEventListener("resize", () => {
+    for (const inst of panels.values()) inst.clamp();
+    for (const inst of countryPanels.values()) inst.clamp();
+  });
 
   // Bottom-edge handle resizes HEIGHT ONLY (this one panel only — resizing never affects the rest
   // of a linked group) — width stays fixed at 380px always, no free-form resizing. Only present
@@ -698,7 +736,6 @@
     inst.clamp();
     setActivePanel(panelId);
     updateCloseButtons();
-    ccSnapToNearestTracker(); // keep the country card beside the (now moved) tracker group
     return inst;
   }
 
@@ -718,12 +755,20 @@
     if (zi !== -1) zOrder.splice(zi, 1);
     inst.destroy();
 
-    // A surviving panel takes over both roles, if there is one — otherwise
-    // there's nothing left to hand them to until setEnabled respawns one.
-    const survivor = panels.size ? panels.keys().next().value : null;
-    if (primaryPanelId === panelId) primaryPanelId = survivor;
+    // Close the gap the removed panel left behind — same as detaching (setLinked): the remaining
+    // linked members (tracker panels and/or the country card) slide together instead of staying
+    // spread out around where the closed window used to sit.
+    layoutSideBySide();
+
+    // A surviving tracker panel takes over the "primary" (position-persisting) role, if there is
+    // one — otherwise there's nothing left to hand it to until setEnabled respawns one.
+    const trackerSurvivor = panels.size ? panels.keys().next().value : null;
+    if (primaryPanelId === panelId) primaryPanelId = trackerSurvivor;
+    // "Active" prefers another tracker panel first (matching prior behavior), falling back to a
+    // country window if none are left — mirrors closeCountryPanel's own (reversed) preference.
     if (activePanelId === panelId) {
-      if (survivor) setActivePanel(survivor);
+      const activeSurvivor = trackerSurvivor || (countryPanels.size ? countryPanels.keys().next().value : null);
+      if (activeSurvivor) setActivePanel(activeSurvivor);
       else activePanelId = null;
     }
 
@@ -762,9 +807,11 @@
       battleItems = d.battles || [];
       for (const inst of panels.values()) inst.onBattleListUpdated();
     } else if (d.kind === "countryList") {
-      ccSetList(d.countries || []);
+      ccCountries = d.countries || [];
+      for (const inst of countryPanels.values()) inst.onCountryListUpdated();
     } else if (d.kind === "countrySummary") {
-      ccRenderSummary(d);
+      const inst = countryPanels.get(d.panelId);
+      if (inst) inst.onSummary(d);
     }
   });
 
@@ -772,6 +819,10 @@
   const relayConfig = () => {
     window.postMessage({ __wdl: CHANNEL, kind: "config", enabled }, location.origin);
   };
+  // Country windows are visible only when BOTH the overall tracker toggle AND their own dedicated
+  // toggle are on — either one turning off hides them all (see setCountryPanelsVisible for what
+  // that also clears).
+  const ccVisibleNow = () => enabled && countryFeatureEnabled;
   const setEnabled = (on) => {
     enabled = on;
     // The user can close every tracker window (including the last one) via
@@ -782,7 +833,7 @@
       primaryPanelId = p.panelId;
     }
     for (const inst of panels.values()) inst.setHostVisible(on);
-    ccSetVisible(on);
+    setCountryPanelsVisible(ccVisibleNow());
     relayConfig();
     if (on) {
       for (const inst of panels.values()) inst.clamp(); // saved position mustn't leave a panel off-screen
@@ -804,229 +855,454 @@
     chrome.storage?.onChanged.addListener((ch) => {
       if (ch.wdlEnabled) setEnabled(ch.wdlEnabled.newValue !== false);
       if (ch.coreColorsEnabled) relayCoreColors(ch.coreColorsEnabled.newValue === true);
+      if (ch.wdlCountryEnabled) {
+        countryFeatureEnabled = ch.wdlCountryEnabled.newValue !== false;
+        setCountryPanelsVisible(ccVisibleNow());
+      }
     });
   } catch (_) {}
 
-  // ---- "Country damage" panel (standalone, simple) --------------------------
-  // A small draggable card: pick a country and the engine draws a line to every active battle it
-  // deals damage in (see map.js "by country" mode). Independent of the battle-tracker panels above,
-  // but shown/hidden with the same wdlEnabled toggle.
-  let ccHost, ccEls, ccSelected = "";
-  let ccCountries = [];               // [{cid,name,code}]
-  let ccComboOpen = false, ccActiveIdx = -1, ccFlat = [];
+  // ---- "Country damage" panels (multi-window, mirrors the tracker panels above) ----------------
+  // Pick a country and the engine draws a line to every active battle it deals damage in (see
+  // map.js "by country" mode). Any number of these windows can be open at once (the "+" button
+  // spawns another, same as the tracker panels), each independently picking its own country.
+  // Shown/hidden by BOTH wdlEnabled (the whole tracker) and their own wdlCountryEnabled toggle.
+  // Drag-links to the tracker panels (and each other) via the shared linkedSet/groupOffset/
+  // layoutSideBySide/makeDraggable machinery above, through instOf().
+  let ccCountries = [];      // [{cid,name,code}] — SHARED list, same data in every window
+  let countryPanelSeq = 0;
+  // Only "total" (the raw cumulative per-battle total) and "now" (since last clicked) — a rolling
+  // "last hour"/"last minute" window was tried and dropped: with only a 10-30s poll cadence it's
+  // never accurate right after switching to it (nothing to backfill from), which read as broken.
+  const CC_WINDOWS = [
+    { id: "total", label: "Ongoing battles" },
+    { id: "now", label: "Now" },
+  ];
   const requestCountryList = () => window.postMessage({ __wdl: CHANNEL, kind: "requestCountryList" }, location.origin);
 
-  function ccMakeDraggable(panel, handle) {
-    let sx, sy, ox, oy, drag = false;
-    handle.addEventListener("mousedown", (e) => { drag = true; const r = panel.getBoundingClientRect(); ox = r.left; oy = r.top; sx = e.clientX; sy = e.clientY; e.preventDefault(); });
-    window.addEventListener("mousemove", (e) => {
-      if (!drag) return;
-      const w = panel.offsetWidth, h = panel.offsetHeight;
-      const left = Math.min(Math.max(MARGIN, ox + (e.clientX - sx)), Math.max(MARGIN, window.innerWidth - w - MARGIN));
-      const top = Math.min(Math.max(MARGIN, oy + (e.clientY - sy)), Math.max(MARGIN, window.innerHeight - h - MARGIN));
-      panel.style.left = left + "px"; panel.style.top = top + "px"; panel.style.right = "auto"; panel.style.bottom = "auto";
-    });
-    window.addEventListener("mouseup", () => { drag = false; });
-  }
-
-  // Park the country card right next to whichever tracker panel is closest to it, so it reads as
-  // part of that group instead of floating in a corner. Prefers the right side, flips left if there's
-  // no room. Runs on show and whenever a tracker panel is spawned/moved.
-  const ccSnapToNearestTracker = () => {
-    if (!ccHost || !ccEls || ccHost.style.display === "none" || !panels.size) return;
-    const cr = ccEls.cp.getBoundingClientRect();
-    const cw = cr.width || 232, ch = cr.height || 120;
-    const ccx = cr.left + cw / 2, ccy = cr.top + ch / 2;
-    let best = null, bestD = Infinity;
-    for (const inst of panels.values()) {
-      const r = inst.getRect();
-      if (!r.width) continue;
-      const dx = (r.left + r.width / 2) - ccx, dy = (r.top + r.height / 2) - ccy;
-      const d = dx * dx + dy * dy;
-      if (d < bestD) { bestD = d; best = r; }
+  const CC_CSS = `
+    :host { all: initial; }
+    .cp { position: fixed; top: 24px; right: 24px; width: 232px; box-sizing: border-box; z-index: ${Z_BASE};
+      display:flex; flex-direction:column; max-height: calc(100vh - 48px); min-height: 0;
+      font-family: "Saira", system-ui, sans-serif; color: #e8e8ea;
+      background: rgba(18,20,26,.92); border: 1px solid rgba(255,255,255,.12);
+      border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,.5); transition: box-shadow .15s; }
+    .cp.active { box-shadow: 0 0 0 2px rgba(255,255,255,.55), 0 10px 34px rgba(0,0,0,.55); }
+    .h { display:flex; align-items:center; gap:6px; padding:8px 10px; cursor:move; font-weight:700; font-size:12px;
+      border-bottom:1px solid rgba(255,255,255,.08); flex:none; }
+    .h .dot { width:8px; height:8px; border-radius:50%; background:#ffcc44; box-shadow:0 0 8px #ffcc44; flex:none; }
+    .h .sp { flex:1; }
+    .h .cd { font-size:9.5px; opacity:.55; font-variant-numeric:tabular-nums; white-space:nowrap; }
+    .h button { all:unset; position:relative; cursor:pointer; opacity:.6; font-size:13px; padding:0 3px; }
+    .h button:hover { opacity:1; }
+    .h button:disabled { opacity:.25; cursor:default; }
+    .h button:disabled:hover { opacity:.25; }
+    .h .link[data-linked="0"] { opacity:.4; }
+    .h .link[data-linked="0"]::before {
+      content:""; position:absolute; left:1px; right:1px; top:50%; height:1px;
+      background: currentColor; transform: rotate(-38deg);
     }
-    if (!best) return;
-    let left = best.left + best.width + GAP;
-    if (left + cw + MARGIN > window.innerWidth) left = best.left - cw - GAP; // no room right -> go left
-    left = Math.min(Math.max(MARGIN, left), Math.max(MARGIN, window.innerWidth - cw - MARGIN));
-    const top = Math.min(Math.max(MARGIN, best.top), Math.max(MARGIN, window.innerHeight - ch - MARGIN));
-    ccEls.cp.style.left = left + "px"; ccEls.cp.style.top = top + "px";
-    ccEls.cp.style.right = "auto"; ccEls.cp.style.bottom = "auto";
-  };
+    .b { padding:8px 10px 10px; flex:1 1 auto; min-height:0; display:flex; flex-direction:column; }
+    .fl { width:16px; height:12px; object-fit:cover; border-radius:2px; flex:none; display:inline-block; }
+    .combo { position:relative; flex:none; }
+    .cbtn { display:flex; align-items:center; gap:5px; width:100%; box-sizing:border-box; background:#20242e; color:#e8e8ea;
+      border:1px solid rgba(255,255,255,.14); border-radius:6px; padding:5px 6px; font:inherit; font-size:12px; cursor:pointer; text-align:left; }
+    .cbtn .lbl { display:flex; align-items:center; gap:6px; flex:1; min-width:0; overflow:hidden; white-space:nowrap; }
+    .cbtn .lbl.ph { opacity:.55; }
+    .cbtn .lbl .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .cbtn .caret { margin-left:auto; opacity:.6; flex:none; }
+    .cpop { position:absolute; left:0; right:0; top:calc(100% + 4px); z-index:2;
+      background:#181b22; border:1px solid rgba(255,255,255,.16); border-radius:8px;
+      box-shadow:0 12px 34px rgba(0,0,0,.6); overflow:hidden; }
+    .cpop[hidden]{ display:none; }
+    .csearch { width:100%; box-sizing:border-box; background:#0f1116; color:#e8e8ea; border:0;
+      border-bottom:1px solid rgba(255,255,255,.1); padding:7px 9px; font:inherit; font-size:12px; outline:none; }
+    .clist { max-height:240px; overflow-y:auto; padding:4px; }
+    .copt { display:flex; align-items:center; gap:6px; padding:5px 6px; border-radius:5px; cursor:pointer; font-size:12px; }
+    .copt:hover, .copt.active { background:rgba(255,255,255,.09); }
+    .copt .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .cclear { display:flex; align-items:center; gap:6px; padding:6px; margin-bottom:2px; border-radius:5px; cursor:pointer;
+      font-size:12px; opacity:.85; border-bottom:1px solid rgba(255,255,255,.06); }
+    .cclear:hover, .cclear.active { background:rgba(255,255,255,.09); }
+    .cnone { opacity:.5; font-size:11px; padding:12px 8px; text-align:center; }
+    .wins { display:flex; gap:4px; margin-top:8px; flex:none; }
+    .wins button { all:unset; flex:1; text-align:center; cursor:pointer; font-size:10.5px; padding:3px 0;
+      border:1px solid rgba(255,255,255,.14); border-radius:5px; opacity:.75; box-sizing:border-box; }
+    .wins button:hover { opacity:1; }
+    .wins button.active { background:rgba(255,204,68,.16); border-color:rgba(255,204,68,.5); opacity:1; color:#ffcc44; }
+    .out { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; overflow:hidden; margin-top:8px; }
+    .tot[hidden], .lst[hidden], .empty[hidden] { display:none; }
+    .tot { font-size:11px; opacity:.7; margin:0 0 4px; flex:none; }
+    .lst { overflow-y:hidden; min-height:0; max-height:54px; transition:max-height .15s ease; }
+    .lst.open { max-height:190px; overflow-y:auto; }
+    .lst.grown { max-height:none; flex:1 1 auto; overflow-y:auto; }
+    .r { display:flex; align-items:center; gap:8px; font-size:12px; margin:4px 0 1px; }
+    .r .nm { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .r .amt { font-weight:700; color:#ffcc44; font-variant-numeric:tabular-nums; }
+    .bar { height:3px; border-radius:2px; background:#ffcc44; }
+    .empty { opacity:.55; font-size:11px; padding:10px 2px; text-align:center; line-height:1.4; flex:none; }
+    .uncollapse { all:unset; display:block; box-sizing:border-box; width:100%; text-align:center;
+      margin-top:6px; padding:4px 8px; font:inherit; font-size:10.5px; opacity:.7; cursor:pointer;
+      border-top:1px solid rgba(255,255,255,.08); flex:none; }
+    .uncollapse:hover { opacity:1; }
+    .hrsz { display:block; flex:none; height:8px; cursor:ns-resize; position:relative; margin-top:2px; }
+    .hrsz::after { content:""; position:absolute; left:50%; top:50%; width:24px; height:3px;
+      transform:translate(-50%,-50%); border-radius:2px; background:rgba(255,255,255,.22); }
+    .hrsz:hover::after { background:rgba(255,255,255,.4); }
+  `;
 
-  function ccBuild() {
-    ccHost = document.createElement("div");
-    ccHost.id = "wdl-country-host";
-    const root = ccHost.attachShadow({ mode: "open" });
-    const style = document.createElement("style");
-    style.textContent = `
-      :host { all: initial; }
-      .cp { position: fixed; top: 24px; right: 24px; width: 232px; box-sizing: border-box; z-index: ${Z_BASE};
-        font-family: "Saira", system-ui, sans-serif; color: #e8e8ea;
-        background: rgba(18,20,26,.92); border: 1px solid rgba(255,255,255,.12);
-        border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,.5); }
-      .h { display:flex; align-items:center; gap:6px; padding:8px 10px; cursor:move; font-weight:700; font-size:12px;
-        border-bottom:1px solid rgba(255,255,255,.08); }
-      .h .dot { width:8px; height:8px; border-radius:50%; background:#ffcc44; box-shadow:0 0 8px #ffcc44; flex:none; }
-      .b { padding:8px 10px 10px; }
-      .fl { width:16px; height:12px; object-fit:cover; border-radius:2px; flex:none; display:inline-block; }
-      .combo { position:relative; }
-      .cbtn { display:flex; align-items:center; gap:5px; width:100%; box-sizing:border-box; background:#20242e; color:#e8e8ea;
-        border:1px solid rgba(255,255,255,.14); border-radius:6px; padding:5px 6px; font:inherit; font-size:12px; cursor:pointer; text-align:left; }
-      .cbtn .lbl { display:flex; align-items:center; gap:6px; flex:1; min-width:0; overflow:hidden; white-space:nowrap; }
-      .cbtn .lbl.ph { opacity:.55; }
-      .cbtn .lbl .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-      .cbtn .caret { margin-left:auto; opacity:.6; flex:none; }
-      .cpop { position:absolute; left:0; right:0; top:calc(100% + 4px); z-index:2;
-        background:#181b22; border:1px solid rgba(255,255,255,.16); border-radius:8px;
-        box-shadow:0 12px 34px rgba(0,0,0,.6); overflow:hidden; }
-      .cpop[hidden]{ display:none; }
-      .csearch { width:100%; box-sizing:border-box; background:#0f1116; color:#e8e8ea; border:0;
-        border-bottom:1px solid rgba(255,255,255,.1); padding:7px 9px; font:inherit; font-size:12px; outline:none; }
-      .clist { max-height:240px; overflow-y:auto; padding:4px; }
-      .copt { display:flex; align-items:center; gap:6px; padding:5px 6px; border-radius:5px; cursor:pointer; font-size:12px; }
-      .copt:hover, .copt.active { background:rgba(255,255,255,.09); }
-      .copt .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-      .cclear { display:flex; align-items:center; gap:6px; padding:6px; margin-bottom:2px; border-radius:5px; cursor:pointer;
-        font-size:12px; opacity:.85; border-bottom:1px solid rgba(255,255,255,.06); }
-      .cclear:hover, .cclear.active { background:rgba(255,255,255,.09); }
-      .cnone { opacity:.5; font-size:11px; padding:12px 8px; text-align:center; }
-      .tot { font-size:11px; opacity:.7; margin:8px 0 4px; }
-      .lst { max-height:210px; overflow-y:auto; }
-      .r { display:flex; align-items:center; gap:8px; font-size:12px; margin:4px 0 1px; }
-      .r .nm { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-      .r .amt { font-weight:700; color:#ffcc44; font-variant-numeric:tabular-nums; }
-      .bar { height:3px; border-radius:2px; background:#ffcc44; }
-      .empty { opacity:.55; font-size:11px; padding:10px 2px; text-align:center; line-height:1.4; }`;
-    root.appendChild(style);
-    const cp = document.createElement("div");
-    cp.className = "cp";
-    cp.innerHTML = `<div class="h"><span class="dot"></span><span>Country damage</span></div>
-      <div class="b">
-        <div class="combo">
-          <button class="cbtn" type="button"><span class="lbl ph">Select a country…</span><span class="caret">▾</span></button>
-          <div class="cpop" hidden>
-            <input class="csearch" type="text" placeholder="Search countries…" spellcheck="false">
-            <div class="clist"></div>
+  function createCountryPanel(panelId) {
+    let host, root, els;
+    let selected = "";
+    let comboOpen = false, activeIdx = -1, flat = [];
+    let uncollapsed = false;   // collapsed by default: peek of ~2 rows, see CSS .lst/.lst.open
+    let customHeight = null;  // remembered manual resize height, like the tracker panels'
+    let windowSel = "total";  // "total" | "now" — see map.js windowedDamage()
+    let nextUpdateAt = 0;     // countdown target, from the engine's countrySummary messages
+
+    const build = () => {
+      host = document.createElement("div");
+      host.id = "wdl-country-host-" + panelId;
+      root = host.attachShadow({ mode: "open" });
+      const style = document.createElement("style");
+      style.textContent = CC_CSS;
+      root.appendChild(style);
+
+      const cp = document.createElement("div");
+      cp.className = "cp";
+      cp.style.zIndex = String(Z_BASE); // raiseInZOrder assigns the real value right after this returns
+      cp.innerHTML = `<div class="h"><span class="dot"></span><span>Country damage</span><span class="sp"></span>
+          <span class="cd" title="Time until the next refresh"></span>
+          <button data-act="add" title="New country damage window">+</button>
+          <button class="link" data-act="link" data-linked="1" title="Detach from group">⛓</button>
+          <button class="close" data-act="close" title="Close this country damage window">✕</button></div>
+        <div class="b">
+          <div class="combo">
+            <button class="cbtn" type="button"><span class="lbl ph">Select a country…</span><span class="caret">▾</span></button>
+            <div class="cpop" hidden>
+              <input class="csearch" type="text" placeholder="Search countries…" spellcheck="false">
+              <div class="clist"></div>
+            </div>
           </div>
-        </div>
-        <div class="out"><div class="empty">Pick a country to see where it deals damage.</div></div>
-      </div>`;
-    root.appendChild(cp);
-    document.documentElement.appendChild(ccHost);
-    ccEls = {
-      cp, h: cp.querySelector(".h"), combo: cp.querySelector(".combo"),
-      cbtn: cp.querySelector(".cbtn"), lbl: cp.querySelector(".cbtn .lbl"),
-      cpop: cp.querySelector(".cpop"), csearch: cp.querySelector(".csearch"),
-      clist: cp.querySelector(".clist"), out: cp.querySelector(".out"),
+          <div class="wins">
+            <button data-win="total" class="active" type="button" title="Each battle's full damage total since it started">Ongoing battles</button>
+            <button data-win="now" type="button" title="Damage dealt since this button was last clicked — click again to reset">Now</button>
+          </div>
+          <div class="out">
+            <div class="tot" hidden></div>
+            <div class="lst" hidden></div>
+            <div class="empty">Pick a country to see where it deals damage.</div>
+          </div>
+          <button class="uncollapse" type="button">▾ Show more</button>
+          <div class="hrsz" title="Drag to resize" style="display:none"></div>
+        </div>`;
+      root.appendChild(cp);
+      document.documentElement.appendChild(host);
+
+      els = {
+        cp, h: cp.querySelector(".h"), cd: cp.querySelector(".cd"), linkBtn: cp.querySelector(".link"),
+        closeBtn: cp.querySelector(".close"),
+        combo: cp.querySelector(".combo"),
+        cbtn: cp.querySelector(".cbtn"), lbl: cp.querySelector(".cbtn .lbl"),
+        cpop: cp.querySelector(".cpop"), csearch: cp.querySelector(".csearch"),
+        clist: cp.querySelector(".clist"), out: cp.querySelector(".out"),
+        tot: cp.querySelector(".tot"), lst: cp.querySelector(".lst"), emptyEl: cp.querySelector(".empty"),
+        winBtns: cp.querySelectorAll(".wins button"),
+        uncollapseBtn: cp.querySelector(".uncollapse"), hrsz: cp.querySelector(".hrsz"),
+      };
+      els.cbtn.addEventListener("click", () => (comboOpen ? closeCombo() : openCombo()));
+      els.csearch.addEventListener("input", () => { activeIdx = 0; renderList(); });
+      els.csearch.addEventListener("keydown", onSearchKey);
+      els.clist.addEventListener("click", (e) => {
+        const opt = e.target.closest("[data-id]");
+        if (opt) choose(opt.getAttribute("data-id"));
+      });
+      window.addEventListener("mousedown", (e) => {
+        if (comboOpen && !e.composedPath().includes(els.combo)) closeCombo();
+      }, true);
+      cp.querySelector('[data-act="add"]').addEventListener("click", () => {
+        spawnCountryPanel();
+        requestCountryList(); // opening a new window refreshes the shared list too
+      });
+      els.linkBtn.addEventListener("click", () => {
+        const nowLinked = els.linkBtn.getAttribute("data-linked") !== "1";
+        setLinked(panelId, nowLinked);
+      });
+      // Closing this window; closing the LAST one turns off the popup's "Country damage" toggle,
+      // same as closing the last LIVE tracker window turns off "Damage lines".
+      els.closeBtn.addEventListener("click", () => closeCountryPanel(panelId));
+      for (const btn of els.winBtns) {
+        btn.addEventListener("click", () => chooseWindow(btn.getAttribute("data-win")));
+      }
+      els.uncollapseBtn.addEventListener("click", () => setUncollapsed(!uncollapsed));
+      // Any interaction with the window makes it the active thing (its country's lines draw on
+      // the map instead of any tracker panel's battle, or any other country window's) — same as
+      // clicking into a tracker panel.
+      cp.addEventListener("mousedown", () => setActivePanel(panelId));
+      makeDraggable(panelId, els.h);
+      makeHeightResizable();
+      setUncollapsed(true); // "Show more" is the default view
     };
-    ccEls.cbtn.addEventListener("click", () => (ccComboOpen ? ccCloseCombo() : ccOpenCombo()));
-    ccEls.csearch.addEventListener("input", () => { ccActiveIdx = 0; ccRenderList(); });
-    ccEls.csearch.addEventListener("keydown", ccOnKey);
-    ccEls.clist.addEventListener("click", (e) => {
-      const opt = e.target.closest("[data-id]");
-      if (opt) ccChoose(opt.getAttribute("data-id"));
-    });
-    window.addEventListener("mousedown", (e) => {
-      if (ccComboOpen && !e.composedPath().includes(ccEls.combo)) ccCloseCombo();
-    }, true);
-    ccMakeDraggable(cp, ccEls.h);
+
+    // Bottom-edge handle resizes this window's height only, exactly like the tracker panels'
+    // makeHeightResizable — only present while uncollapsed (see setUncollapsed).
+    function makeHeightResizable() {
+      let sy, sh, ot, resizing = false;
+      els.hrsz.addEventListener("mousedown", (e) => {
+        resizing = true;
+        const r = els.cp.getBoundingClientRect();
+        sh = r.height; sy = e.clientY; ot = r.top;
+        els.cp.style.top = r.top + "px"; els.cp.style.bottom = "auto";
+        els.lst.classList.add("grown");
+        e.preventDefault(); e.stopPropagation();
+      });
+      window.addEventListener("mousemove", (e) => {
+        if (!resizing) return;
+        const maxH = Math.max(160, window.innerHeight - ot - MARGIN);
+        els.cp.style.height = Math.max(160, Math.min(sh + (e.clientY - sy), maxH)) + "px";
+      });
+      window.addEventListener("mouseup", () => {
+        if (!resizing) return;
+        resizing = false;
+        customHeight = els.cp.style.height;
+      });
+    }
+
+    // Collapsed (default): the list is capped to a ~2-row peek (CSS .lst, no scroll). Uncollapsed:
+    // capped to a ~7-row window with scrolling (CSS .lst.open); dragging .hrsz grows the WINDOW,
+    // and .lst.grown switches it to fill that extra space (flex) instead of staying capped,
+    // revealing more of the (always fully-rendered) list.
+    const setUncollapsed = (on) => {
+      uncollapsed = on;
+      if (on) {
+        els.lst.classList.add("open");
+        els.hrsz.style.display = "";
+        if (customHeight) { els.cp.style.height = customHeight; els.lst.classList.add("grown"); }
+      } else {
+        els.lst.classList.remove("open", "grown");
+        els.hrsz.style.display = "none";
+        els.cp.style.height = "";
+      }
+      els.uncollapseBtn.textContent = on ? "▴ Show less" : "▾ Show more";
+    };
+
+    const openCombo = () => {
+      comboOpen = true; els.cpop.hidden = false; els.csearch.value = "";
+      activeIdx = 0; renderList(); els.csearch.focus();
+      requestCountryList(); // always refresh on open, not just when empty — see the battle picker's openPicker
+    };
+    const closeCombo = () => { if (!comboOpen) return; comboOpen = false; els.cpop.hidden = true; };
+
+    const filteredCountries = () => {
+      const q = els.csearch.value.trim().toLowerCase();
+      return q ? ccCountries.filter((c) => (c.name || "").toLowerCase().includes(q)) : ccCountries;
+    };
+
+    const renderList = () => {
+      const items = filteredCountries();
+      flat = [""]; // index 0 = the clear/none row
+      let html = `<div class="cclear" data-id=""><span class="fl"></span><span class="nm" style="opacity:.7">None (clear)</span></div>`;
+      for (const c of items) {
+        const idx = flat.length;
+        flat.push(c.cid);
+        html += `<div class="copt" data-id="${esc(c.cid)}" data-idx="${idx}" title="${esc(c.name || "")}">${flagImg(c)}<span class="nm">${esc(c.name || "?")}</span></div>`;
+      }
+      if (!items.length) html += `<div class="cnone">No matching countries.</div>`;
+      els.clist.innerHTML = html;
+      highlight();
+    };
+
+    const highlight = () => {
+      els.clist.querySelectorAll("[data-id]").forEach((r) => {
+        const i = r.classList.contains("cclear") ? 0 : Number(r.getAttribute("data-idx"));
+        const on = i === activeIdx;
+        r.classList.toggle("active", on);
+        if (on) r.scrollIntoView({ block: "nearest" });
+      });
+    };
+
+    const onSearchKey = (e) => {
+      if (e.key === "ArrowDown") { activeIdx = Math.min(flat.length - 1, activeIdx + 1); highlight(); e.preventDefault(); }
+      else if (e.key === "ArrowUp") { activeIdx = Math.max(0, activeIdx - 1); highlight(); e.preventDefault(); }
+      else if (e.key === "Enter") { if (activeIdx >= 0 && activeIdx < flat.length) choose(flat[activeIdx]); e.preventDefault(); }
+      else if (e.key === "Escape") { closeCombo(); }
+    };
+
+    const renderTrigger = () => {
+      const c = ccCountries.find((x) => x.cid === selected);
+      if (selected && c) { els.lbl.className = "lbl"; els.lbl.innerHTML = `${flagImg(c)}<span class="nm">${esc(c.name || "?")}</span>`; }
+      else if (selected) { els.lbl.className = "lbl"; els.lbl.textContent = "Selected country"; }
+      else { els.lbl.className = "lbl ph"; els.lbl.textContent = "Select a country…"; }
+    };
+
+    const setEmpty = (msg) => {
+      els.tot.hidden = true;
+      els.lst.hidden = true;
+      els.emptyEl.hidden = false;
+      els.emptyEl.textContent = msg;
+    };
+
+    const choose = (cid) => {
+      selected = cid || "";
+      renderTrigger();
+      closeCombo();
+      nextUpdateAt = 0;
+      window.postMessage({ __wdl: CHANNEL, kind: "selectCountry", panelId, countryId: selected || null }, location.origin);
+      setEmpty(selected ? "Loading…" : "Pick a country to see where it deals damage.");
+    };
+
+    const chooseWindow = (win) => {
+      if (!CC_WINDOWS.some((w) => w.id === win)) return;
+      windowSel = win;
+      for (const b of els.winBtns) b.classList.toggle("active", b.getAttribute("data-win") === win);
+      window.postMessage({ __wdl: CHANNEL, kind: "selectCountryWindow", panelId, window: win }, location.origin);
+    };
+
+    // Clears the selection without closing the window — used when the whole feature is hidden
+    // (toggled off) so nothing keeps polling in the background while nothing is shown.
+    const clearSelection = () => {
+      if (!selected) return;
+      selected = "";
+      nextUpdateAt = 0;
+      renderTrigger();
+      closeCombo();
+      setEmpty("Pick a country to see where it deals damage.");
+      window.postMessage({ __wdl: CHANNEL, kind: "selectCountry", panelId, countryId: null }, location.origin);
+    };
+
+    const onCountryListUpdated = () => {
+      renderTrigger();               // the selected country's flag/name may only now be resolvable
+      if (comboOpen) renderList();
+    };
+
+    // The list/total are STABLE elements (built once in build()) — only their content is updated
+    // here, never the elements themselves, so els.lst stays a valid reference for the collapse/
+    // resize CSS-class toggling in setUncollapsed/makeHeightResizable.
+    const onSummary = (d) => {
+      if (d.countryId !== selected) return; // ignore stale / other-selection updates
+      nextUpdateAt = d.nextUpdateAt || 0;
+      if (!selected) { setEmpty("Pick a country to see where it deals damage."); return; }
+      const targets = d.targets || [];
+      if (!targets.length) {
+        setEmpty(`No damage from ${d.name || "this country"} in the selected window right now.`);
+        return;
+      }
+      els.emptyEl.hidden = true;
+      els.tot.hidden = false;
+      els.tot.textContent = `${targets.length} battle${targets.length > 1 ? "s" : ""} · ${fmt(d.total)} total`;
+      els.lst.hidden = false;
+      const max = Math.max(1, ...targets.map((t) => t.damage));
+      els.lst.innerHTML = targets.map((t) =>
+        `<div><div class="r"><span class="nm">${esc(t.regionName || "?")}</span><span class="amt">${fmt(t.damage)}</span></div>` +
+        `<div class="bar" style="width:${Math.max(3, (t.damage / max) * 100)}%"></div></div>`).join("");
+    };
+
+    // Ticks the "time until the next refresh" label in the header every second.
+    let tickTimer = setInterval(() => {
+      if (!selected || !nextUpdateAt) { els.cd.textContent = ""; return; }
+      const secs = Math.max(0, Math.ceil((nextUpdateAt - Date.now()) / 1000));
+      els.cd.textContent = `↻ ${secs}s`;
+    }, 1000);
+
+    const getRect = () => els.cp.getBoundingClientRect();
+    const getPos = () => { const r = getRect(); return { left: r.left, top: r.top }; };
+    const setPos = (left, top) => {
+      els.cp.style.left = left + "px"; els.cp.style.top = top + "px";
+      els.cp.style.right = "auto"; els.cp.style.bottom = "auto";
+    };
+    const clamp = () => clampEl(els && els.cp);
+    const setActive = (on) => els.cp.classList.toggle("active", on);
+    const bringToFront = () => raiseInZOrder(panelId);
+    const setLinkButton = (linked) => {
+      els.linkBtn.setAttribute("data-linked", linked ? "1" : "0");
+      els.linkBtn.title = linked ? "Detach from group" : "Attach to group";
+    };
+    const setHostVisible = (on) => { if (host) host.style.display = on ? "" : "none"; };
+    const destroy = () => {
+      clearInterval(tickTimer);
+      if (host) { host.remove(); host = null; }
+    };
+
+    build();
+
+    return {
+      panelId,
+      get panelEl() { return els.cp; },
+      onSummary, onCountryListUpdated,
+      getRect, getPos, setPos, clamp, setActive, bringToFront, setLinkButton,
+      setHostVisible, clearSelection, destroy,
+      choose,
+    };
   }
 
-  const ccOpenCombo = () => {
-    if (!ccEls) return;
-    ccComboOpen = true; ccEls.cpop.hidden = false; ccEls.csearch.value = "";
-    ccActiveIdx = 0; ccRenderList(); ccEls.csearch.focus();
-  };
-  const ccCloseCombo = () => { if (!ccComboOpen) return; ccComboOpen = false; if (ccEls) ccEls.cpop.hidden = true; };
+  // ---- spawn / registry (mirrors spawnPanel/closePanel above) ---------------------------------
+  // activate=false is used only at boot, for the very first country window — it should exist but
+  // NOT steal "active" away from the tracker panel that boot() already activated moments earlier.
+  // Every other spawn (the "+" button, or re-enabling from zero) activates, same as tracker panels.
+  function spawnCountryPanel(activate = true) {
+    const panelId = "cp" + (++countryPanelSeq) + "-" + Math.random().toString(36).slice(2, 6);
+    const inst = createCountryPanel(panelId);
+    countryPanels.set(panelId, inst);
+    inst.setHostVisible(ccVisibleNow());
+    linkedSet.add(panelId);
+    inst.setLinkButton(true);
+    layoutSideBySide();
+    inst.clamp();
+    if (activate) setActivePanel(panelId);
+    return inst;
+  }
 
-  const ccFilteredCountries = () => {
-    const q = ccEls.csearch.value.trim().toLowerCase();
-    return q ? ccCountries.filter((c) => (c.name || "").toLowerCase().includes(q)) : ccCountries;
-  };
+  function closeCountryPanel(panelId) {
+    const inst = countryPanels.get(panelId);
+    if (!inst) return;
 
-  const ccRenderList = () => {
-    if (!ccEls) return;
-    const items = ccFilteredCountries();
-    ccFlat = [""]; // index 0 = the clear/none row
-    let html = `<div class="cclear" data-id=""><span class="fl"></span><span class="nm" style="opacity:.7">None (clear)</span></div>`;
-    for (const c of items) {
-      const idx = ccFlat.length;
-      ccFlat.push(c.cid);
-      html += `<div class="copt" data-id="${esc(c.cid)}" data-idx="${idx}" title="${esc(c.name || "")}">${flagImg(c)}<span class="nm">${esc(c.name || "?")}</span></div>`;
+    countryPanels.delete(panelId);
+    linkedSet.delete(panelId);
+    groupOffset.delete(panelId);
+    const zi = zOrder.indexOf(panelId);
+    if (zi !== -1) zOrder.splice(zi, 1);
+    inst.destroy();
+
+    // Close the gap the removed window left behind — same as detaching (setLinked) or closing a
+    // tracker panel (closePanel): the remaining linked members slide together.
+    layoutSideBySide();
+
+    if (activePanelId === panelId) {
+      // Hand activity to a surviving country window first, then a tracker panel, matching the
+      // "closest kind of thing" preference closePanel uses for its own survivor.
+      const survivor = countryPanels.size ? countryPanels.keys().next().value
+        : (panels.size ? panels.keys().next().value : null);
+      if (survivor) setActivePanel(survivor);
+      else activePanelId = null;
     }
-    if (!items.length) html += `<div class="cnone">No matching countries.</div>`;
-    ccEls.clist.innerHTML = html;
-    ccHighlight();
-  };
 
-  const ccHighlight = () => {
-    ccEls.clist.querySelectorAll("[data-id]").forEach((r) => {
-      const i = r.classList.contains("cclear") ? 0 : Number(r.getAttribute("data-idx"));
-      const on = i === ccActiveIdx;
-      r.classList.toggle("active", on);
-      if (on) r.scrollIntoView({ block: "nearest" });
-    });
-  };
+    window.postMessage({ __wdl: CHANNEL, kind: "unregisterCountryPanel", panelId }, location.origin);
 
-  const ccOnKey = (e) => {
-    if (e.key === "ArrowDown") { ccActiveIdx = Math.min(ccFlat.length - 1, ccActiveIdx + 1); ccHighlight(); e.preventDefault(); }
-    else if (e.key === "ArrowUp") { ccActiveIdx = Math.max(0, ccActiveIdx - 1); ccHighlight(); e.preventDefault(); }
-    else if (e.key === "Enter") { if (ccActiveIdx >= 0 && ccActiveIdx < ccFlat.length) ccChoose(ccFlat[ccActiveIdx]); e.preventDefault(); }
-    else if (e.key === "Escape") { ccCloseCombo(); }
-  };
-
-  const ccRenderTrigger = () => {
-    if (!ccEls) return;
-    const c = ccCountries.find((x) => x.cid === ccSelected);
-    if (ccSelected && c) { ccEls.lbl.className = "lbl"; ccEls.lbl.innerHTML = `${flagImg(c)}<span class="nm">${esc(c.name || "?")}</span>`; }
-    else if (ccSelected) { ccEls.lbl.className = "lbl"; ccEls.lbl.textContent = "Selected country"; }
-    else { ccEls.lbl.className = "lbl ph"; ccEls.lbl.textContent = "Select a country…"; }
-  };
-
-  const ccChoose = (cid) => {
-    ccSelected = cid || "";
-    ccRenderTrigger();
-    ccCloseCombo();
-    window.postMessage({ __wdl: CHANNEL, kind: "selectCountry", countryId: ccSelected || null }, location.origin);
-    if (ccEls) ccEls.out.innerHTML = ccSelected
-      ? `<div class="empty">Loading…</div>`
-      : `<div class="empty">Pick a country to see where it deals damage.</div>`;
-  };
-
-  const ccSetList = (countries) => {
-    ccCountries = countries || [];
-    ccRenderTrigger();               // the selected country's flag/name may only now be resolvable
-    if (ccComboOpen) ccRenderList();
-  };
-
-  const ccRenderSummary = (d) => {
-    if (!ccEls || d.countryId !== ccSelected) return; // ignore stale / other-selection updates
-    if (!ccSelected) { ccEls.out.innerHTML = `<div class="empty">Pick a country to see where it deals damage.</div>`; return; }
-    const targets = d.targets || [];
-    if (!targets.length) {
-      ccEls.out.innerHTML = `<div class="empty">No active battles with damage from ${esc(d.name || "this country")} right now.</div>`;
-      return;
+    // Closing the last country window leaves nothing on screen — reflect that in the popup's
+    // "Country damage" toggle, same as closing the last LIVE tracker window turns off "Damage
+    // lines". Re-checking it there is how the user gets a first window back (see setCountryPanelsVisible).
+    if (!countryPanels.size) {
+      countryFeatureEnabled = false;
+      try { chrome.storage?.local.set({ wdlCountryEnabled: false }); } catch (_) {}
     }
-    const max = Math.max(1, ...targets.map((t) => t.damage));
-    ccEls.out.innerHTML =
-      `<div class="tot">${targets.length} battle${targets.length > 1 ? "s" : ""} · ${fmt(d.total)} total</div><div class="lst">` +
-      targets.map((t) =>
-        `<div><div class="r"><span class="nm">${esc(t.regionName || "?")}</span><span class="amt">${fmt(t.damage)}</span></div>` +
-        `<div class="bar" style="width:${Math.max(3, (t.damage / max) * 100)}%"></div></div>`).join("") +
-      `</div>`;
-  };
+  }
 
-  const ccSetVisible = (on) => {
-    if (!ccHost) return;
-    ccHost.style.display = on ? "" : "none";
-    if (on) ccSnapToNearestTracker();
-    if (!on && ccSelected) { // turning the tracker off clears the selection so nothing keeps polling
-      ccSelected = "";
-      ccRenderTrigger();
-      ccCloseCombo();
-      if (ccEls) ccEls.out.innerHTML = `<div class="empty">Pick a country to see where it deals damage.</div>`;
-      window.postMessage({ __wdl: CHANNEL, kind: "selectCountry", countryId: null }, location.origin);
+  // Shows/hides every open country window together (driven by wdlEnabled AND wdlCountryEnabled —
+  // see ccVisibleNow). Mirrors setEnabled's tracker-panel handling: respawns a first window when
+  // turning on from zero, and hands "active" back to a tracker panel (plus clears every window's
+  // selection) when turning off.
+  const setCountryPanelsVisible = (on) => {
+    if (on && countryPanels.size === 0) spawnCountryPanel();
+    for (const inst of countryPanels.values()) inst.setHostVisible(on);
+    if (on) {
+      for (const inst of countryPanels.values()) inst.clamp();
+    } else {
+      if (activePanelId && countryPanels.has(activePanelId)) {
+        const survivor = panels.size ? panels.keys().next().value : null;
+        if (survivor) setActivePanel(survivor);
+        else activePanelId = null;
+      }
+      for (const inst of countryPanels.values()) inst.clearSelection();
     }
   };
 
@@ -1034,13 +1310,15 @@
   const boot = () => {
     const first = spawnPanel();
     primaryPanelId = first.panelId;
-    ccBuild();
+    // activate=false: this window should exist, but not steal "active" away from the tracker
+    // panel spawnPanel() just activated above (see spawnCountryPanel's own comment).
+    spawnCountryPanel(false);
     try {
       // Only touch position/size if something was actually saved — otherwise the CSS default
       // (top:24px;left:24px, set above) is already correct and needs no JS repositioning,
       // so there's no flash-then-jump on a fresh install / first-ever load.
       chrome.storage?.local.get(
-        ["wdlPos", "wdlSize", "wdlEnabled", "coreColorsEnabled"],
+        ["wdlPos", "wdlSize", "wdlEnabled", "coreColorsEnabled", "wdlCountryEnabled"],
         (v) => {
           if (v.wdlPos) {
             const left = parseFloat(v.wdlPos.left), top = parseFloat(v.wdlPos.top);
@@ -1048,6 +1326,13 @@
           }
           if (v.wdlSize) first.setSize(v.wdlSize.height);
           first.clamp();
+          // spawnCountryPanel() (above) already ran layoutSideBySide() once, anchoring the country
+          // window to the tracker panel's DEFAULT position — but the restore just above may have
+          // just moved that panel to a different saved position, which doesn't itself re-flow the
+          // group. Redo it now so they start out properly aligned/adjacent instead of only fixing
+          // itself the first time the user drags something.
+          layoutSideBySide();
+          countryFeatureEnabled = v.wdlCountryEnabled !== false; // read before setEnabled -> setCountryPanelsVisible
           setEnabled(v.wdlEnabled !== false);
           relayCoreColors(v.coreColorsEnabled === true);
         }
@@ -1061,9 +1346,15 @@
     // battle.getGroupedActiveBattles is worth calling, and this whole thing runs at
     // document_start — very early — so the first attempt can occasionally come back empty
     // (page/session not fully settled yet). First shot after a short delay, then a safety-net
-    // retry a bit later, only if the list is still empty by then.
+    // retry a bit later, only if the list is still empty by then. (The country combo also
+    // re-requests every time it's opened — see ccOpenCombo — but this retry still matters for
+    // the map lines' own country-label lookups, which don't get that same on-open nudge.)
     setTimeout(() => { if (enabled) { requestBattleList(); requestCountryList(); } }, 1500);
-    setTimeout(() => { if (enabled && !battleItems.length) requestBattleList(); }, 4000);
+    setTimeout(() => {
+      if (!enabled) return;
+      if (!battleItems.length) requestBattleList();
+      if (!ccCountries.length) requestCountryList();
+    }, 4000);
   };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
   else boot();
