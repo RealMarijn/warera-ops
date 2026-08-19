@@ -678,6 +678,29 @@
   let lastPinQuery = 0;
   const PIN_MASK_R = 17;     // radius (px) of the hole cut around each pin — tune to the icon size
 
+  // ---- "by country" mode: pick a country, draw a line to every active battle it deals damage in.
+  // Damage per battle comes from battleRanking.getRanking(type:"country", side:"merged"), which lists
+  // EVERY contributing country (attacker, defender, allies, mercs) — so this catches a country's
+  // damage even in battles it isn't a belligerent of. Two refresh tiers keep the cost sane:
+  //   - fast (10s): re-poll only the battles where the country is attacker/defender (cheap, a few).
+  //   - full (30s): re-poll ALL active battles to (re)discover merc/ally involvement (~1 call each).
+  // The active-battle index (region + the two side countries per battle) is rebuilt less often still.
+  const COUNTRY_COLOR = "#ffcc44";
+  const COUNTRY_FAST_MS = 10000;
+  const COUNTRY_FULL_MS = 30000;
+  const COUNTRY_INDEX_MS = 90000;
+  const RANK_CONCURRENCY = 6;    // cap simultaneous ranking fetches during a scan
+  let gCountryArcs, gCountryNodes;
+  const countryArcEls = new Map();      // battleId -> { path, grad, s0, s1 }
+  let countryNode = null;               // { halo, core } origin marker at the selected country
+  let countrySel = null;                // selected countryId, or null (mode off)
+  const countryTargets = new Map();     // battleId -> { region, damage } (only where damage > 0)
+  const PULSE_MS = 5000;                // how long a line pulses after its battle's damage changes
+  const countryPrevDmg = new Map();     // battleId -> last-seen damage (to detect a change)
+  const countryPulseUntil = new Map();  // battleId -> timestamp until which its line pulses
+  const activeBattleIndex = new Map();  // battleId -> { region, att, def }
+  let countryFastTimer = null, countryFullTimer = null, countryIndexTimer = null;
+
   const ensureSvg = () => {
     if (svg) return;
     svg = document.createElementNS(NS, "svg");
@@ -714,13 +737,20 @@
     const st = document.createElementNS(NS, "style");
     st.textContent =
       "@keyframes wdl-pulse{0%,100%{opacity:.5}50%{opacity:1}}" +
-      "#wdl-map-lines .wdl-live-halo{animation:wdl-pulse 1.6s ease-in-out infinite}";
+      "#wdl-map-lines .wdl-live-halo{animation:wdl-pulse 1.6s ease-in-out infinite}" +
+      "@keyframes wdl-cpulse{0%,100%{opacity:1}50%{opacity:.28}}" +
+      "#wdl-map-lines .wdl-cpulse{animation:wdl-cpulse .8s ease-in-out infinite}";
     svg.appendChild(st);
     gAllArcs = document.createElementNS(NS, "g");
     gAllArcs.setAttribute("mask", "url(#wdl-pinmask)"); // ribbons pass behind the on-canvas battle pins
     svg.appendChild(gAllArcs);
+    gCountryArcs = document.createElementNS(NS, "g"); // "by country" ribbons (own layer)
+    gCountryArcs.setAttribute("mask", "url(#wdl-pinmask)"); // also pass behind the battle pins
+    svg.appendChild(gCountryArcs);
     gAllNodes = document.createElementNS(NS, "g"); // origin markers, painted above ALL ribbons
     svg.appendChild(gAllNodes);
+    gCountryNodes = document.createElementNS(NS, "g"); // "by country" origin marker, above its ribbons
+    svg.appendChild(gCountryNodes);
     gCoreFlags = document.createElementNS(NS, "g"); // core-country-colors flag markers, above everything else
     gCoreFlags.style.display = "none";
     svg.appendChild(gCoreFlags);
@@ -993,9 +1023,202 @@
     for (let i = pinCoords.length; i < pinCircles.length; i++) pinCircles[i].style.display = "none";
   };
 
+  // ---- "by country" mode ------------------------------------------------
+  const mapLimit = async (arr, limit, fn) => {
+    const out = [];
+    let i = 0;
+    const worker = async () => { while (i < arr.length) { const idx = i++; out[idx] = await fn(arr[idx]); } };
+    await Promise.all(Array.from({ length: Math.min(limit, arr.length) }, worker));
+    return out;
+  };
+
+  const buildActiveBattleIndex = async () => {
+    let grouped;
+    try { grouped = await trpcRaw("battle.getGroupedActiveBattles", {}); } catch (_) { return; }
+    const g = (grouped && grouped.json) || grouped || {};
+    const ids = new Set();
+    for (const k in g) if (Array.isArray(g[k])) for (const id of g[k]) if (typeof id === "string") ids.add(id);
+    const list = [...ids].slice(0, 80); // cap the getById fan-out
+    await mapLimit(list, RANK_CONCURRENCY, async (id) => {
+      try {
+        const d = await trpcRaw("battle.getById", { battleId: id });
+        const region = d && d.defender && d.defender.region;
+        if (region) activeBattleIndex.set(id, {
+          region,
+          att: d.attacker && d.attacker.country,
+          def: d.defender && d.defender.country,
+        });
+      } catch (_) {}
+    });
+    for (const id of [...activeBattleIndex.keys()]) if (!ids.has(id)) activeBattleIndex.delete(id);
+  };
+
+  // The selected country's damage in one battle (merged ranking lists every country on both sides).
+  const fetchCountryDamage = async (battleId, cid) => {
+    try {
+      const d = await trpcRaw("battleRanking.getRanking", { battleId, type: "country", dataType: "damage", side: "merged" });
+      const items = (d && d.items) || [];
+      const row = items.find((x) => x.country === cid);
+      return row ? (row.value || 0) : 0;
+    } catch (_) { return 0; }
+  };
+
+  const applyScan = (sel, results) => {
+    if (sel !== countrySel) return; // selection changed mid-scan — drop stale results
+    const now = Date.now();
+    let pulsed = false;
+    for (const { id, dmg } of results) {
+      const idx = activeBattleIndex.get(id);
+      if (dmg > 0 && idx) {
+        const prev = countryPrevDmg.get(id);
+        countryTargets.set(id, { region: idx.region, damage: dmg });
+        // Pulse only on a real increase from a known previous value — not on first discovery
+        // (that would flash every line at once and mean nothing).
+        if (prev !== undefined && dmg > prev) { countryPulseUntil.set(id, now + PULSE_MS); pulsed = true; }
+        countryPrevDmg.set(id, dmg);
+      } else {
+        countryTargets.delete(id);
+        countryPrevDmg.delete(id);
+        countryPulseUntil.delete(id);
+      }
+    }
+    drawCountry();
+    postCountrySummary();
+    // The map may be idle (no render frames) — make sure the pulse class gets cleared after 5s.
+    if (pulsed) setTimeout(() => { if (sel === countrySel) drawCountry(); }, PULSE_MS + 150);
+  };
+
+  const countryFullScan = async () => {
+    const sel = countrySel;
+    if (!sel) return;
+    const ids = [...activeBattleIndex.keys()];
+    const results = await mapLimit(ids, RANK_CONCURRENCY, async (id) => ({ id, dmg: await fetchCountryDamage(id, sel) }));
+    applyScan(sel, results);
+  };
+
+  const countryFastScan = async () => {
+    const sel = countrySel;
+    if (!sel) return;
+    const ids = [...activeBattleIndex.entries()].filter(([, idx]) => idx.att === sel || idx.def === sel).map(([id]) => id);
+    const results = await mapLimit(ids, RANK_CONCURRENCY, async (id) => ({ id, dmg: await fetchCountryDamage(id, sel) }));
+    applyScan(sel, results);
+  };
+
+  const stopCountryTimers = () => {
+    for (const t of [countryFastTimer, countryFullTimer, countryIndexTimer]) if (t) clearInterval(t);
+    countryFastTimer = countryFullTimer = countryIndexTimer = null;
+  };
+  const startCountryTimers = async () => {
+    stopCountryTimers();
+    await buildActiveBattleIndex();
+    if (!countrySel) return; // deselected while the index built
+    countryFullScan();
+    countryFastTimer = setInterval(countryFastScan, COUNTRY_FAST_MS);
+    countryFullTimer = setInterval(countryFullScan, COUNTRY_FULL_MS);
+    countryIndexTimer = setInterval(async () => { await buildActiveBattleIndex(); }, COUNTRY_INDEX_MS);
+  };
+
+  const sendCountryList = () => {
+    const countries = Object.keys(countryMeta)
+      .filter((cid) => countryPos[cid]) // only ones we can anchor a line from
+      .map((cid) => ({ cid, name: countryMeta[cid].name || "?", code: countryMeta[cid].code || "" }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    window.postMessage({ __wdl: CHANNEL, kind: "countryList", countries }, location.origin);
+  };
+
+  const postCountrySummary = () => {
+    const targets = countrySel
+      ? [...countryTargets.entries()]
+          .map(([, t]) => ({ regionName: (regionMeta[t.region] && regionMeta[t.region].name) || null, damage: t.damage }))
+          .sort((a, b) => b.damage - a.damage)
+      : [];
+    window.postMessage({
+      __wdl: CHANNEL, kind: "countrySummary",
+      countryId: countrySel,
+      name: countrySel ? ((countryMeta[countrySel] && countryMeta[countrySel].name) || "?") : null,
+      targets, total: targets.reduce((s, t) => s + t.damage, 0),
+    }, location.origin);
+  };
+
+  const selectCountry = (cid) => {
+    countrySel = cid || null;
+    countryTargets.clear();
+    countryPrevDmg.clear();
+    countryPulseUntil.clear();
+    drawCountry();
+    postCountrySummary();
+    if (countrySel) startCountryTimers();
+    else stopCountryTimers();
+  };
+
+  const makeCountryArc = (battleId) => {
+    const grad = document.createElementNS(NS, "linearGradient");
+    grad.setAttribute("gradientUnits", "userSpaceOnUse");
+    grad.id = "wdlcg-" + battleId;
+    const s0 = document.createElementNS(NS, "stop"); s0.setAttribute("offset", "0");
+    const s1 = document.createElementNS(NS, "stop"); s1.setAttribute("offset", "1");
+    grad.append(s0, s1);
+    defsEl.appendChild(grad);
+    const path = document.createElementNS(NS, "path");
+    path.setAttribute("fill", `url(#${grad.id})`);
+    path.setAttribute("stroke", "none");
+    gCountryArcs.appendChild(path);
+    return { path, grad, s0, s1 };
+  };
+
+  const drawCountry = () => {
+    if (!gCountryArcs) return;
+    const origin = countrySel && countryPos[countrySel];
+    if (!enabled || !origin) {
+      gCountryArcs.style.display = "none";
+      if (gCountryNodes) gCountryNodes.style.display = "none";
+      return;
+    }
+    gCountryArcs.style.display = "";
+    gCountryNodes.style.display = "";
+    const op = map.project(origin);
+    const originOcc = isOccludedOnGlobe(origin);
+    const entries = [...countryTargets.entries()];
+    const maxD = Math.max(1, ...entries.map(([, t]) => t.damage));
+    const live = new Set();
+    for (const [battleId, t] of entries) {
+      const rp = regionPos[t.region];
+      if (!rp) continue;
+      live.add(battleId);
+      let e = countryArcEls.get(battleId);
+      if (!e) { e = makeCountryArc(battleId); countryArcEls.set(battleId, e); }
+      const tp = map.project(rp);
+      const wMax = 4 + (t.damage / maxD) * 30;
+      e.path.setAttribute("d", isGlobeMode() ? ribbonPathGlobe(origin, rp, wMax) : ribbonPath(op, tp, wMax));
+      e.grad.setAttribute("x1", op.x); e.grad.setAttribute("y1", op.y);
+      e.grad.setAttribute("x2", tp.x); e.grad.setAttribute("y2", tp.y);
+      e.s0.setAttribute("stop-color", COUNTRY_COLOR); e.s0.setAttribute("stop-opacity", "0.30");
+      e.s1.setAttribute("stop-color", COUNTRY_COLOR); e.s1.setAttribute("stop-opacity", "0.95");
+      e.path.style.display = (originOcc || isOccludedOnGlobe(rp)) ? "none" : "";
+      e.path.classList.toggle("wdl-cpulse", (countryPulseUntil.get(battleId) || 0) > Date.now());
+    }
+    for (const [battleId, e] of countryArcEls) {
+      if (!live.has(battleId)) { e.path.remove(); e.grad.remove(); countryArcEls.delete(battleId); }
+    }
+    // origin node at the selected country
+    if (!countryNode) {
+      const halo = document.createElementNS(NS, "circle"); halo.setAttribute("stroke", "none");
+      halo.setAttribute("fill", COUNTRY_COLOR); halo.setAttribute("fill-opacity", "0.22");
+      const core = document.createElementNS(NS, "circle"); core.setAttribute("stroke", "#fff");
+      core.setAttribute("stroke-width", "1.25"); core.setAttribute("fill", COUNTRY_COLOR);
+      gCountryNodes.append(halo, core);
+      countryNode = { halo, core };
+    }
+    const showNode = !originOcc;
+    for (const c of [countryNode.halo, countryNode.core]) c.style.display = showNode ? "" : "none";
+    countryNode.core.setAttribute("cx", op.x); countryNode.core.setAttribute("cy", op.y); countryNode.core.setAttribute("r", "6");
+    countryNode.halo.setAttribute("cx", op.x); countryNode.halo.setAttribute("cy", op.y); countryNode.halo.setAttribute("r", "15");
+  };
+
   const draw = (doPost) => {
     if (!ready || !svg) return;
     updatePinMask();
+    drawCountry();
     const watched = watchedBattleIds();
 
     // Drop draw state for battles no longer watched by any panel.
@@ -1216,12 +1439,18 @@
     const d = e.data;
     if (!d || d.__wdl !== CHANNEL) return;
     if (d.kind === "lasthit") onLastHit(d, "tap");
-    else if (d.kind === "config") { enabled = d.enabled !== false; draw(true); }
+    else if (d.kind === "config") {
+      enabled = d.enabled !== false;
+      if (!enabled) stopCountryTimers(); else if (countrySel) startCountryTimers();
+      draw(true);
+    }
     else if (d.kind === "registerPanel") registerPanel(d.panelId);
     else if (d.kind === "unregisterPanel") unregisterPanel(d.panelId);
     else if (d.kind === "selectBattle") selectBattle(d.panelId, d.battleId || null);
     else if (d.kind === "setActivePanel") setActivePanel(d.panelId);
     else if (d.kind === "requestBattleList") buildBattleList();
+    else if (d.kind === "requestCountryList") sendCountryList();
+    else if (d.kind === "selectCountry") selectCountry(d.countryId || null);
     else if (d.kind === "coreColors") setCoreColorsEnabled(d.enabled);
   });
 

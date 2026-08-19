@@ -649,10 +649,11 @@
       draggedStart = null;
       followers = null;
       persistPrimary();
+      ccSnapToNearestTracker(); // keep the country card parked next to the nearest tracker
     });
   }
   // Re-clamp every panel on viewport resize so a shrinking window can't leave any panel off-screen.
-  window.addEventListener("resize", () => { for (const inst of panels.values()) inst.clamp(); });
+  window.addEventListener("resize", () => { for (const inst of panels.values()) inst.clamp(); ccSnapToNearestTracker(); });
 
   // Bottom-edge handle resizes HEIGHT ONLY (this one panel only — resizing never affects the rest
   // of a linked group) — width stays fixed at 380px always, no free-form resizing. Only present
@@ -697,6 +698,7 @@
     inst.clamp();
     setActivePanel(panelId);
     updateCloseButtons();
+    ccSnapToNearestTracker(); // keep the country card beside the (now moved) tracker group
     return inst;
   }
 
@@ -759,6 +761,10 @@
     } else if (d.kind === "battleList") {
       battleItems = d.battles || [];
       for (const inst of panels.values()) inst.onBattleListUpdated();
+    } else if (d.kind === "countryList") {
+      ccSetList(d.countries || []);
+    } else if (d.kind === "countrySummary") {
+      ccRenderSummary(d);
     }
   });
 
@@ -776,10 +782,12 @@
       primaryPanelId = p.panelId;
     }
     for (const inst of panels.values()) inst.setHostVisible(on);
+    ccSetVisible(on);
     relayConfig();
     if (on) {
       for (const inst of panels.values()) inst.clamp(); // saved position mustn't leave a panel off-screen
       if (!listRequested) requestBattleList();
+      requestCountryList();
     }
   };
 
@@ -799,10 +807,234 @@
     });
   } catch (_) {}
 
+  // ---- "Country damage" panel (standalone, simple) --------------------------
+  // A small draggable card: pick a country and the engine draws a line to every active battle it
+  // deals damage in (see map.js "by country" mode). Independent of the battle-tracker panels above,
+  // but shown/hidden with the same wdlEnabled toggle.
+  let ccHost, ccEls, ccSelected = "";
+  let ccCountries = [];               // [{cid,name,code}]
+  let ccComboOpen = false, ccActiveIdx = -1, ccFlat = [];
+  const requestCountryList = () => window.postMessage({ __wdl: CHANNEL, kind: "requestCountryList" }, location.origin);
+
+  function ccMakeDraggable(panel, handle) {
+    let sx, sy, ox, oy, drag = false;
+    handle.addEventListener("mousedown", (e) => { drag = true; const r = panel.getBoundingClientRect(); ox = r.left; oy = r.top; sx = e.clientX; sy = e.clientY; e.preventDefault(); });
+    window.addEventListener("mousemove", (e) => {
+      if (!drag) return;
+      const w = panel.offsetWidth, h = panel.offsetHeight;
+      const left = Math.min(Math.max(MARGIN, ox + (e.clientX - sx)), Math.max(MARGIN, window.innerWidth - w - MARGIN));
+      const top = Math.min(Math.max(MARGIN, oy + (e.clientY - sy)), Math.max(MARGIN, window.innerHeight - h - MARGIN));
+      panel.style.left = left + "px"; panel.style.top = top + "px"; panel.style.right = "auto"; panel.style.bottom = "auto";
+    });
+    window.addEventListener("mouseup", () => { drag = false; });
+  }
+
+  // Park the country card right next to whichever tracker panel is closest to it, so it reads as
+  // part of that group instead of floating in a corner. Prefers the right side, flips left if there's
+  // no room. Runs on show and whenever a tracker panel is spawned/moved.
+  const ccSnapToNearestTracker = () => {
+    if (!ccHost || !ccEls || ccHost.style.display === "none" || !panels.size) return;
+    const cr = ccEls.cp.getBoundingClientRect();
+    const cw = cr.width || 232, ch = cr.height || 120;
+    const ccx = cr.left + cw / 2, ccy = cr.top + ch / 2;
+    let best = null, bestD = Infinity;
+    for (const inst of panels.values()) {
+      const r = inst.getRect();
+      if (!r.width) continue;
+      const dx = (r.left + r.width / 2) - ccx, dy = (r.top + r.height / 2) - ccy;
+      const d = dx * dx + dy * dy;
+      if (d < bestD) { bestD = d; best = r; }
+    }
+    if (!best) return;
+    let left = best.left + best.width + GAP;
+    if (left + cw + MARGIN > window.innerWidth) left = best.left - cw - GAP; // no room right -> go left
+    left = Math.min(Math.max(MARGIN, left), Math.max(MARGIN, window.innerWidth - cw - MARGIN));
+    const top = Math.min(Math.max(MARGIN, best.top), Math.max(MARGIN, window.innerHeight - ch - MARGIN));
+    ccEls.cp.style.left = left + "px"; ccEls.cp.style.top = top + "px";
+    ccEls.cp.style.right = "auto"; ccEls.cp.style.bottom = "auto";
+  };
+
+  function ccBuild() {
+    ccHost = document.createElement("div");
+    ccHost.id = "wdl-country-host";
+    const root = ccHost.attachShadow({ mode: "open" });
+    const style = document.createElement("style");
+    style.textContent = `
+      :host { all: initial; }
+      .cp { position: fixed; top: 24px; right: 24px; width: 232px; box-sizing: border-box; z-index: ${Z_BASE};
+        font-family: "Saira", system-ui, sans-serif; color: #e8e8ea;
+        background: rgba(18,20,26,.92); border: 1px solid rgba(255,255,255,.12);
+        border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,.5); }
+      .h { display:flex; align-items:center; gap:6px; padding:8px 10px; cursor:move; font-weight:700; font-size:12px;
+        border-bottom:1px solid rgba(255,255,255,.08); }
+      .h .dot { width:8px; height:8px; border-radius:50%; background:#ffcc44; box-shadow:0 0 8px #ffcc44; flex:none; }
+      .b { padding:8px 10px 10px; }
+      .fl { width:16px; height:12px; object-fit:cover; border-radius:2px; flex:none; display:inline-block; }
+      .combo { position:relative; }
+      .cbtn { display:flex; align-items:center; gap:5px; width:100%; box-sizing:border-box; background:#20242e; color:#e8e8ea;
+        border:1px solid rgba(255,255,255,.14); border-radius:6px; padding:5px 6px; font:inherit; font-size:12px; cursor:pointer; text-align:left; }
+      .cbtn .lbl { display:flex; align-items:center; gap:6px; flex:1; min-width:0; overflow:hidden; white-space:nowrap; }
+      .cbtn .lbl.ph { opacity:.55; }
+      .cbtn .lbl .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .cbtn .caret { margin-left:auto; opacity:.6; flex:none; }
+      .cpop { position:absolute; left:0; right:0; top:calc(100% + 4px); z-index:2;
+        background:#181b22; border:1px solid rgba(255,255,255,.16); border-radius:8px;
+        box-shadow:0 12px 34px rgba(0,0,0,.6); overflow:hidden; }
+      .cpop[hidden]{ display:none; }
+      .csearch { width:100%; box-sizing:border-box; background:#0f1116; color:#e8e8ea; border:0;
+        border-bottom:1px solid rgba(255,255,255,.1); padding:7px 9px; font:inherit; font-size:12px; outline:none; }
+      .clist { max-height:240px; overflow-y:auto; padding:4px; }
+      .copt { display:flex; align-items:center; gap:6px; padding:5px 6px; border-radius:5px; cursor:pointer; font-size:12px; }
+      .copt:hover, .copt.active { background:rgba(255,255,255,.09); }
+      .copt .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .cclear { display:flex; align-items:center; gap:6px; padding:6px; margin-bottom:2px; border-radius:5px; cursor:pointer;
+        font-size:12px; opacity:.85; border-bottom:1px solid rgba(255,255,255,.06); }
+      .cclear:hover, .cclear.active { background:rgba(255,255,255,.09); }
+      .cnone { opacity:.5; font-size:11px; padding:12px 8px; text-align:center; }
+      .tot { font-size:11px; opacity:.7; margin:8px 0 4px; }
+      .lst { max-height:210px; overflow-y:auto; }
+      .r { display:flex; align-items:center; gap:8px; font-size:12px; margin:4px 0 1px; }
+      .r .nm { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .r .amt { font-weight:700; color:#ffcc44; font-variant-numeric:tabular-nums; }
+      .bar { height:3px; border-radius:2px; background:#ffcc44; }
+      .empty { opacity:.55; font-size:11px; padding:10px 2px; text-align:center; line-height:1.4; }`;
+    root.appendChild(style);
+    const cp = document.createElement("div");
+    cp.className = "cp";
+    cp.innerHTML = `<div class="h"><span class="dot"></span><span>Country damage</span></div>
+      <div class="b">
+        <div class="combo">
+          <button class="cbtn" type="button"><span class="lbl ph">Select a country…</span><span class="caret">▾</span></button>
+          <div class="cpop" hidden>
+            <input class="csearch" type="text" placeholder="Search countries…" spellcheck="false">
+            <div class="clist"></div>
+          </div>
+        </div>
+        <div class="out"><div class="empty">Pick a country to see where it deals damage.</div></div>
+      </div>`;
+    root.appendChild(cp);
+    document.documentElement.appendChild(ccHost);
+    ccEls = {
+      cp, h: cp.querySelector(".h"), combo: cp.querySelector(".combo"),
+      cbtn: cp.querySelector(".cbtn"), lbl: cp.querySelector(".cbtn .lbl"),
+      cpop: cp.querySelector(".cpop"), csearch: cp.querySelector(".csearch"),
+      clist: cp.querySelector(".clist"), out: cp.querySelector(".out"),
+    };
+    ccEls.cbtn.addEventListener("click", () => (ccComboOpen ? ccCloseCombo() : ccOpenCombo()));
+    ccEls.csearch.addEventListener("input", () => { ccActiveIdx = 0; ccRenderList(); });
+    ccEls.csearch.addEventListener("keydown", ccOnKey);
+    ccEls.clist.addEventListener("click", (e) => {
+      const opt = e.target.closest("[data-id]");
+      if (opt) ccChoose(opt.getAttribute("data-id"));
+    });
+    window.addEventListener("mousedown", (e) => {
+      if (ccComboOpen && !e.composedPath().includes(ccEls.combo)) ccCloseCombo();
+    }, true);
+    ccMakeDraggable(cp, ccEls.h);
+  }
+
+  const ccOpenCombo = () => {
+    if (!ccEls) return;
+    ccComboOpen = true; ccEls.cpop.hidden = false; ccEls.csearch.value = "";
+    ccActiveIdx = 0; ccRenderList(); ccEls.csearch.focus();
+  };
+  const ccCloseCombo = () => { if (!ccComboOpen) return; ccComboOpen = false; if (ccEls) ccEls.cpop.hidden = true; };
+
+  const ccFilteredCountries = () => {
+    const q = ccEls.csearch.value.trim().toLowerCase();
+    return q ? ccCountries.filter((c) => (c.name || "").toLowerCase().includes(q)) : ccCountries;
+  };
+
+  const ccRenderList = () => {
+    if (!ccEls) return;
+    const items = ccFilteredCountries();
+    ccFlat = [""]; // index 0 = the clear/none row
+    let html = `<div class="cclear" data-id=""><span class="fl"></span><span class="nm" style="opacity:.7">None (clear)</span></div>`;
+    for (const c of items) {
+      const idx = ccFlat.length;
+      ccFlat.push(c.cid);
+      html += `<div class="copt" data-id="${esc(c.cid)}" data-idx="${idx}" title="${esc(c.name || "")}">${flagImg(c)}<span class="nm">${esc(c.name || "?")}</span></div>`;
+    }
+    if (!items.length) html += `<div class="cnone">No matching countries.</div>`;
+    ccEls.clist.innerHTML = html;
+    ccHighlight();
+  };
+
+  const ccHighlight = () => {
+    ccEls.clist.querySelectorAll("[data-id]").forEach((r) => {
+      const i = r.classList.contains("cclear") ? 0 : Number(r.getAttribute("data-idx"));
+      const on = i === ccActiveIdx;
+      r.classList.toggle("active", on);
+      if (on) r.scrollIntoView({ block: "nearest" });
+    });
+  };
+
+  const ccOnKey = (e) => {
+    if (e.key === "ArrowDown") { ccActiveIdx = Math.min(ccFlat.length - 1, ccActiveIdx + 1); ccHighlight(); e.preventDefault(); }
+    else if (e.key === "ArrowUp") { ccActiveIdx = Math.max(0, ccActiveIdx - 1); ccHighlight(); e.preventDefault(); }
+    else if (e.key === "Enter") { if (ccActiveIdx >= 0 && ccActiveIdx < ccFlat.length) ccChoose(ccFlat[ccActiveIdx]); e.preventDefault(); }
+    else if (e.key === "Escape") { ccCloseCombo(); }
+  };
+
+  const ccRenderTrigger = () => {
+    if (!ccEls) return;
+    const c = ccCountries.find((x) => x.cid === ccSelected);
+    if (ccSelected && c) { ccEls.lbl.className = "lbl"; ccEls.lbl.innerHTML = `${flagImg(c)}<span class="nm">${esc(c.name || "?")}</span>`; }
+    else if (ccSelected) { ccEls.lbl.className = "lbl"; ccEls.lbl.textContent = "Selected country"; }
+    else { ccEls.lbl.className = "lbl ph"; ccEls.lbl.textContent = "Select a country…"; }
+  };
+
+  const ccChoose = (cid) => {
+    ccSelected = cid || "";
+    ccRenderTrigger();
+    ccCloseCombo();
+    window.postMessage({ __wdl: CHANNEL, kind: "selectCountry", countryId: ccSelected || null }, location.origin);
+    if (ccEls) ccEls.out.innerHTML = ccSelected
+      ? `<div class="empty">Loading…</div>`
+      : `<div class="empty">Pick a country to see where it deals damage.</div>`;
+  };
+
+  const ccSetList = (countries) => {
+    ccCountries = countries || [];
+    ccRenderTrigger();               // the selected country's flag/name may only now be resolvable
+    if (ccComboOpen) ccRenderList();
+  };
+
+  const ccRenderSummary = (d) => {
+    if (!ccEls || d.countryId !== ccSelected) return; // ignore stale / other-selection updates
+    if (!ccSelected) { ccEls.out.innerHTML = `<div class="empty">Pick a country to see where it deals damage.</div>`; return; }
+    const targets = d.targets || [];
+    if (!targets.length) {
+      ccEls.out.innerHTML = `<div class="empty">No active battles with damage from ${esc(d.name || "this country")} right now.</div>`;
+      return;
+    }
+    const max = Math.max(1, ...targets.map((t) => t.damage));
+    ccEls.out.innerHTML =
+      `<div class="tot">${targets.length} battle${targets.length > 1 ? "s" : ""} · ${fmt(d.total)} total</div><div class="lst">` +
+      targets.map((t) =>
+        `<div><div class="r"><span class="nm">${esc(t.regionName || "?")}</span><span class="amt">${fmt(t.damage)}</span></div>` +
+        `<div class="bar" style="width:${Math.max(3, (t.damage / max) * 100)}%"></div></div>`).join("") +
+      `</div>`;
+  };
+
+  const ccSetVisible = (on) => {
+    if (!ccHost) return;
+    ccHost.style.display = on ? "" : "none";
+    if (on) ccSnapToNearestTracker();
+    if (!on && ccSelected) { // turning the tracker off clears the selection so nothing keeps polling
+      ccSelected = "";
+      ccRenderTrigger();
+      ccCloseCombo();
+      if (ccEls) ccEls.out.innerHTML = `<div class="empty">Pick a country to see where it deals damage.</div>`;
+      window.postMessage({ __wdl: CHANNEL, kind: "selectCountry", countryId: null }, location.origin);
+    }
+  };
+
   // ---- boot -----------------------------------------------------------------
   const boot = () => {
     const first = spawnPanel();
     primaryPanelId = first.panelId;
+    ccBuild();
     try {
       // Only touch position/size if something was actually saved — otherwise the CSS default
       // (top:24px;left:24px, set above) is already correct and needs no JS repositioning,
@@ -830,7 +1062,7 @@
     // document_start — very early — so the first attempt can occasionally come back empty
     // (page/session not fully settled yet). First shot after a short delay, then a safety-net
     // retry a bit later, only if the list is still empty by then.
-    setTimeout(() => { if (enabled) requestBattleList(); }, 1500);
+    setTimeout(() => { if (enabled) { requestBattleList(); requestCountryList(); } }, 1500);
     setTimeout(() => { if (enabled && !battleItems.length) requestBattleList(); }, 4000);
   };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
