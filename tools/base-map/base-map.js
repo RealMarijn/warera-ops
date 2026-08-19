@@ -18,8 +18,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wbmEngine = "0.5.0"; } catch (_) {}
-  console.log("[WBM] base-map.js engine v0.5.0 loaded");
+  try { document.documentElement.dataset.wbmEngine = "0.6.0"; } catch (_) {}
+  console.log("[WBM] base-map.js engine v0.6.0 loaded");
 
   const CHANNEL = "warera-base-map";
   const NS = "http://www.w3.org/2000/svg";
@@ -198,25 +198,27 @@
   };
 
   // Simple white glyphs so a base and a bunker read differently at a glance.
-  const starPoints = (outer, inner, spikes = 5) => {
-    let pts = [], rot = -Math.PI / 2, step = Math.PI / spikes;
-    for (let i = 0; i < spikes; i++) {
-      pts.push([Math.cos(rot) * outer, Math.sin(rot) * outer]); rot += step;
-      pts.push([Math.cos(rot) * inner, Math.sin(rot) * inner]); rot += step;
-    }
-    return pts.map((p) => p.map((n) => n.toFixed(2)).join(",")).join(" ");
-  };
-
+  // Both paths are the game's own item-icon shapes (sword.svg / armor.svg),
+  // just recolored to plain white — no fill color of their own, only the
+  // shape matters here. Each viewBox is centered on its own path's bounding
+  // box and scaled down to roughly the same footprint the old star/dome
+  // glyphs had (~10px across), via `scale(s) translate(-cx -cy)` (applied
+  // right-to-left: shift the path's own center to the origin, then shrink).
   const makeGlyph = (layer) => {
     if (layer === "bases") {
-      const poly = document.createElementNS(NS, "polygon"); // star = base
-      poly.setAttribute("points", starPoints(5.4, 2.3));
-      poly.setAttribute("fill", "#fff");
-      return poly;
+      const path = document.createElementNS(NS, "path"); // sword = base
+      path.setAttribute("d",
+        "M18.8025 2.44L6.9025 14.34L4.7825 12.22L3.3725 13.63L5.8425 16.1L2.6625 19.28C2.2725 19.67 " +
+        "2.2725 20.3 2.6625 20.69L3.3725 21.4C3.7625 21.79 4.3925 21.79 4.7825 21.4L8.0025 18.23L10.4425 " +
+        "20.7L11.8525 19.29L9.7325 17.17L21.6325 5.27V2.44H18.8025Z");
+      path.setAttribute("fill", "#fff");
+      path.setAttribute("transform", "scale(0.52) translate(-12 -12.065)");
+      return path;
     }
-    const path = document.createElementNS(NS, "path");      // dome = bunker
-    path.setAttribute("d", "M -5 3.5 L -5 0 A 5 5 0 0 1 5 0 L 5 3.5 Z");
+    const path = document.createElementNS(NS, "path"); // armor = bunker
+    path.setAttribute("d", "M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1Z");
     path.setAttribute("fill", "#fff");
+    path.setAttribute("transform", "scale(0.455) translate(-12 -12)");
     return path;
   };
 

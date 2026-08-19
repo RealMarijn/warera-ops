@@ -12,8 +12,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wbmPanel = "0.1.0"; } catch (_) {}
-  console.log("[WBM] base-overlay.js panel v0.1.0 loaded");
+  try { document.documentElement.dataset.wbmPanel = "0.2.0"; } catch (_) {}
+  console.log("[WBM] base-overlay.js panel v0.2.0 loaded");
 
   const CHANNEL = "warera-base-map";
   const LAYERS = ["bases", "bunkers"];
@@ -143,9 +143,16 @@
     .clear[hidden] { display: none; }
   `;
 
+  // Same sword/armor shapes as the map badges (base-map.js's makeGlyph) —
+  // same centering/scaling transform too, just keeping this icon's own dark
+  // fill (contrasts against its accent-colored square background here,
+  // unlike the white-on-circle map badges).
   const GLYPH = {
-    bases: '<polygon points="0,-5.4 1.3,-1.7 5.1,-1.7 2,0.6 3.2,4.4 0,2 -3.2,4.4 -2,0.6 -5.1,-1.7 -1.3,-1.7" fill="#1a1400"/>',
-    bunkers: '<path d="M -5 3.5 L -5 0 A 5 5 0 0 1 5 0 L 5 3.5 Z" fill="#062230"/>',
+    bases: '<path d="M18.8025 2.44L6.9025 14.34L4.7825 12.22L3.3725 13.63L5.8425 16.1L2.6625 19.28C2.2725 19.67 ' +
+      '2.2725 20.3 2.6625 20.69L3.3725 21.4C3.7625 21.79 4.3925 21.79 4.7825 21.4L8.0025 18.23L10.4425 ' +
+      '20.7L11.8525 19.29L9.7325 17.17L21.6325 5.27V2.44H18.8025Z" fill="#1a1400" transform="scale(0.52) translate(-12 -12.065)"/>',
+    bunkers: '<path d="M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1Z" ' +
+      'fill="#062230" transform="scale(0.455) translate(-12 -12)"/>',
   };
   const svgIco = (layer) =>
     `<svg viewBox="-7 -7 14 14" xmlns="http://www.w3.org/2000/svg">${GLYPH[layer]}</svg>`;
@@ -201,8 +208,10 @@
   };
 
   const regionUrl = (id) => "https://app.warera.io/region/" + encodeURIComponent(id);
+  // No target="_blank" — navigates in the same tab, same as clicking any
+  // other in-app link (the user's own preference over opening a new tab).
   const regionLink = (name, id) =>
-    id ? `<a target="_blank" href="${esc(regionUrl(id))}">${esc(name)}</a>` : esc(name);
+    id ? `<a href="${esc(regionUrl(id))}">${esc(name)}</a>` : esc(name);
 
   const makeCard = (key, layer, titleHtml, subHtml) => {
     if (shown.has(key)) return; // already on screen
