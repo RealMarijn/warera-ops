@@ -12,28 +12,44 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wbmPanel = "0.2.0"; } catch (_) {}
-  console.log("[WBM] base-overlay.js panel v0.2.0 loaded");
+  try { document.documentElement.dataset.wbmPanel = "0.3.0"; } catch (_) {}
+  console.log("[WBM] base-overlay.js panel v0.3.0 loaded");
 
   const CHANNEL = "warera-base-map";
+  // Toast-notification layers only — resistance is a live number, not an
+  // active/pending/disabled upgrade, so it has no "just lit up" event worth
+  // toasting (see POLL_LAYERS below for the actual full poll/relay set).
   const LAYERS = ["bases", "bunkers"];
+  const POLL_LAYERS = ["bases", "bunkers", "resistance"];
   const POLL_MS = 2 * 60 * 1000; // spec: refresh every 2 minutes
-  const PATH = { bases: "/api/ext/regions/bases", bunkers: "/api/ext/regions/bunkers" };
+  const PATH = {
+    bases: "/api/ext/regions/bases",
+    bunkers: "/api/ext/regions/bunkers",
+    resistance: "/api/ext/regions/resistance",
+  };
+  const STORAGE_KEY = {
+    bases: "showBasesEnabled",
+    bunkers: "showBunkersEnabled",
+    resistance: "showResistanceEnabled",
+  };
   const META = {
     bases:   { color: "#f59e0b", label: "Military base" },
     bunkers: { color: "#38bdf8", label: "Bunker" },
   };
 
-  const toggles = { bases: false, bunkers: false }; // user intent (popup/menu)
+  const toggles = { bases: false, bunkers: false, resistance: false }; // user intent (popup/menu)
   let loggedIn = false;
   let pollTimer = null;
   let polling = false;
 
   const eff = (layer) => toggles[layer] && loggedIn;   // actually-on for this layer
-  const anyEff = () => eff("bases") || eff("bunkers");
+  const anyEff = () => POLL_LAYERS.some(eff);
 
   const relay = (msg) => window.postMessage(Object.assign({ __wbm: CHANNEL }, msg), location.origin);
-  const relayConfig = () => relay({ kind: "config", enabled: { bases: eff("bases"), bunkers: eff("bunkers") } });
+  const relayConfig = () => relay({
+    kind: "config",
+    enabled: { bases: eff("bases"), bunkers: eff("bunkers"), resistance: eff("resistance") },
+  });
 
   // ---- backend polling --------------------------------------------------
   const isLoggedOut = (err) =>
@@ -44,7 +60,7 @@
     polling = true;
     try {
       const out = {};
-      for (const layer of LAYERS) {
+      for (const layer of POLL_LAYERS) {
         if (!eff(layer)) continue;
         try {
           const data = await browser.runtime.sendMessage({
@@ -299,9 +315,10 @@
   const applyToggles = (v) => {
     toggles.bases = v.showBasesEnabled === true;
     toggles.bunkers = v.showBunkersEnabled === true;
+    toggles.resistance = v.showResistanceEnabled === true;
   };
 
-  browser.storage.local.get(["showBasesEnabled", "showBunkersEnabled"]).then((v) => {
+  browser.storage.local.get(Object.values(STORAGE_KEY)).then((v) => {
     applyToggles(v);
     relayConfig();
     refreshAuth().then(schedulePolling);
@@ -309,14 +326,15 @@
 
   browser.storage.onChanged.addListener((ch, area) => {
     if (area !== "local") return;
-    if ("showBasesEnabled" in ch || "showBunkersEnabled" in ch) {
-      for (const layer of LAYERS) {
-        const key = layer === "bases" ? "showBasesEnabled" : "showBunkersEnabled";
+    if (POLL_LAYERS.some((layer) => STORAGE_KEY[layer] in ch)) {
+      for (const layer of POLL_LAYERS) {
+        const key = STORAGE_KEY[layer];
         if (!(key in ch)) continue;
         const on = ch[key].newValue === true;
         const was = ch[key].oldValue === true;
         toggles[layer] = on;
-        if (on && !was) requestTest(layer); // preview toast the moment it's switched on
+        // Preview toast only for bases/bunkers — resistance has no toast at all.
+        if (on && !was && LAYERS.includes(layer)) requestTest(layer);
       }
       relayConfig();
       schedulePolling();

@@ -16,8 +16,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wsrEngine = "0.2.0"; } catch (_) {}
-  console.log("[WSR] sr-map.js engine v0.2.0 loaded");
+  try { document.documentElement.dataset.wsrEngine = "0.4.0"; } catch (_) {}
+  console.log("[WSR] sr-map.js engine v0.4.0 loaded");
 
   const CHANNEL = "warera-sr-map";
   const NS = "http://www.w3.org/2000/svg";
@@ -122,9 +122,9 @@
   // badge "slots" a given region needs and which slot is this engine's,
   // without either one owning the other's data. See base-map.js's copy of
   // this same block for the full reasoning.
-  const BADGE_TYPES = ["bases", "bunkers", "sr"];
+  const BADGE_TYPES = ["bases", "bunkers", "sr", "resistance"];
   const badgeRegistry = (window.__wdlBadgeRegistry = window.__wdlBadgeRegistry || {
-    bases: new Set(), bunkers: new Set(), sr: new Set(),
+    bases: new Set(), bunkers: new Set(), sr: new Set(), resistance: new Set(),
   });
   const sameSet = (a, b) => a.size === b.size && [...a].every((x) => b.has(x));
   const publishBadgeRegions = (updates) => {
@@ -135,14 +135,16 @@
     Object.assign(badgeRegistry, updates);
     if (changed) window.dispatchEvent(new CustomEvent("wdl-badge-registry-changed"));
   };
-  const BADGE_OFFSET_PAIR = [[-10, 0], [10, 0]];
-  const BADGE_OFFSET_TRIANGLE = [[0, -11], [-9.5, 6], [9.5, 6]];
+  const BADGE_OFFSET_PAIR = [[-14, 0], [14, 0]];
+  const BADGE_OFFSET_TRIANGLE = [[0, -16], [-14, 9], [14, 9]];
+  const BADGE_OFFSET_QUAD = [[0, -16], [16, 0], [0, 16], [-16, 0]];
   const badgeOffset = (myKey, regionId) => {
     const present = BADGE_TYPES.filter((k) => badgeRegistry[k] && badgeRegistry[k].has(regionId));
     const idx = present.indexOf(myKey);
     if (idx === -1 || present.length <= 1) return [0, 0];
     if (present.length === 2) return BADGE_OFFSET_PAIR[idx];
-    return BADGE_OFFSET_TRIANGLE[idx];
+    if (present.length === 3) return BADGE_OFFSET_TRIANGLE[idx];
+    return BADGE_OFFSET_QUAD[idx];
   };
   window.addEventListener("wdl-badge-registry-changed", () => draw());
 

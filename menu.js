@@ -11,6 +11,7 @@ const toggles = [
   { el: document.getElementById("toggle-sr"), key: "srMapEnabled", defaultOn: false },
   { el: document.getElementById("toggle-bases"), key: "showBasesEnabled", defaultOn: false },
   { el: document.getElementById("toggle-bunkers"), key: "showBunkersEnabled", defaultOn: false },
+  { el: document.getElementById("toggle-resistance"), key: "showResistanceEnabled", defaultOn: false },
 ];
 
 const keys = toggles.map((t) => t.key);
@@ -31,7 +32,9 @@ for (const t of toggles) {
 // Strategic resources, core-country-colors, bases and bunkers all live under
 // a single expandable section. The header shows how many of them are on so
 // the state is visible while the group is collapsed (its default).
-const mapFeatureKeys = ["srMapEnabled", "coreColorsEnabled", "showBasesEnabled", "showBunkersEnabled"];
+const mapFeatureKeys = [
+  "srMapEnabled", "coreColorsEnabled", "showBasesEnabled", "showBunkersEnabled", "showResistanceEnabled",
+];
 const mapFeatureEls = mapFeatureKeys
   .map((key) => toggles.find((t) => t.key === key)?.el)
   .filter(Boolean);
@@ -39,13 +42,18 @@ const mapBtn = document.getElementById("map-features-btn");
 const mapSubmenu = document.getElementById("map-submenu");
 const mapCountEl = document.getElementById("map-count");
 
-// Bases/bunkers pull from the whitelist-gated backend, so their menu rows only
-// exist for logged-in (approved) users. Hidden until auth resolves, and not
-// counted in the "N on" pill while hidden.
+// Bases/bunkers/resistance pull from the whitelist-gated backend, so their
+// menu rows only exist for logged-in (approved) users. Hidden until auth
+// resolves, and not counted in the "N on" pill while hidden.
 const authGatedEls = new Set(
-  ["showBasesEnabled", "showBunkersEnabled"].map((k) => toggles.find((t) => t.key === k)?.el).filter(Boolean),
+  ["showBasesEnabled", "showBunkersEnabled", "showResistanceEnabled"]
+    .map((k) => toggles.find((t) => t.key === k)?.el).filter(Boolean),
 );
-const authGatedRows = [document.getElementById("row-bases"), document.getElementById("row-bunkers")].filter(Boolean);
+const authGatedRows = [
+  document.getElementById("row-bases"),
+  document.getElementById("row-bunkers"),
+  document.getElementById("row-resistance"),
+].filter(Boolean);
 let authGated = true; // assume not-approved until WARERA_OPS_AUTH_STATUS says otherwise
 
 function applyAuthGate(loggedIn) {

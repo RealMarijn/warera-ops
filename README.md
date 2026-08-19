@@ -2,7 +2,7 @@
 
 # WarEra Ops
 
-A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats to the [WarEra](https://app.warera.io) browser game, pulled from WarEra's own public API and styled to match the game's own UI.
+A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats, a live battle damage tracker, and map overlays (bases, bunkers, resistance, core country colors) to the [WarEra](https://app.warera.io) browser game — mostly pulled from WarEra's own public API, with a few whitelist-gated features backed by a companion server — styled to match the game's own UI.
 
 ## Features
 
