@@ -12,6 +12,8 @@ const toggles = [
   { el: document.getElementById("toggle-bases"), key: "showBasesEnabled", defaultOn: false },
   { el: document.getElementById("toggle-bunkers"), key: "showBunkersEnabled", defaultOn: false },
   { el: document.getElementById("toggle-resistance"), key: "showResistanceEnabled", defaultOn: false },
+  // Battle-view stat features (watched by their own feature scripts, e.g. battle-contracts.js).
+  { el: document.getElementById("toggle-open-contracts"), key: "openContractsEnabled", defaultOn: true },
 ];
 
 const keys = toggles.map((t) => t.key);
@@ -20,6 +22,7 @@ browser.storage.local.get(keys).then((v) => {
     t.el.checked = t.key in v ? v[t.key] === true : t.defaultOn;
   }
   updateMapCount();
+  updateBattleCount();
 });
 
 for (const t of toggles) {
@@ -76,6 +79,32 @@ if (mapBtn && mapSubmenu) {
   });
 }
 for (const el of mapFeatureEls) el.addEventListener("change", updateMapCount);
+
+// ── "Battle features" collapsible group ───────────────────────────────────
+// Same accordion pattern as the map group, for stat features injected into the
+// battle view (currently just Open contracts).
+const battleFeatureKeys = ["openContractsEnabled"];
+const battleFeatureEls = battleFeatureKeys
+  .map((key) => toggles.find((t) => t.key === key)?.el)
+  .filter(Boolean);
+const battleBtn = document.getElementById("battle-features-btn");
+const battleSubmenu = document.getElementById("battle-submenu");
+const battleCountEl = document.getElementById("battle-count");
+
+function updateBattleCount() {
+  if (!battleCountEl) return;
+  const n = battleFeatureEls.filter((el) => el.checked).length;
+  battleCountEl.textContent = `${n} on`;
+  battleCountEl.hidden = n === 0;
+}
+
+if (battleBtn && battleSubmenu) {
+  battleBtn.addEventListener("click", () => {
+    const open = battleSubmenu.classList.toggle("open");
+    battleBtn.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+}
+for (const el of battleFeatureEls) el.addEventListener("change", updateBattleCount);
 
 // ── Discord login (whitelist-gated access to our backend) ─────────────────
 // All the actual auth logic (pairing, token storage, refresh) lives in

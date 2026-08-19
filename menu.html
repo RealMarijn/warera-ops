@@ -315,6 +315,35 @@
         </div>
       </div>
 
+      <div class="group">
+        <button type="button" class="group-hdr" id="battle-features-btn"
+                aria-expanded="false" aria-controls="battle-submenu">
+          <span class="label">
+            <span>Battle features</span>
+            <small>Extra stats injected into the battle view.</small>
+          </span>
+          <span class="group-count" id="battle-count" hidden></span>
+          <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="6 9 12 15 18 9"></polyline>
+          </svg>
+        </button>
+        <div class="submenu" id="battle-submenu">
+          <div class="submenu-inner">
+            <div class="row">
+              <span class="label">
+                <span>Open contracts</span>
+                <small>Show the total amount of damage and BTC that is in open contracts.</small>
+              </span>
+              <label class="switch">
+                <input type="checkbox" id="toggle-open-contracts" />
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="hint">Open app.warera.io to see the effect.</div>
 
       <div class="auth">
