@@ -668,6 +668,16 @@
   let svg, gAllArcs, gAllNodes, defsEl, gCoreFlags;
   const battleDraw = new Map(); // battleId -> { gArcs, gNodes, arcEls: Map<countryId,{...}> }
 
+  // The game's battle icons (the "battle-pin"/"region-battle-dot" map layers) are drawn ON the
+  // WebGL map canvas, so no z-index can place our SVG lines between the terrain and those pins —
+  // the lines always ended up on top of the pins. Instead we cut soft holes out of the ribbons
+  // wherever a battle pin sits (via an SVG mask), so the lines read as passing BEHIND the pins.
+  let pinHoles = null;       // <g> of mask discs (one per visible battle pin)
+  const pinCircles = [];     // pooled <circle> elements, reused across frames
+  let pinCoords = [];        // [lng,lat] of every visible battle pin (refreshed on a throttle)
+  let lastPinQuery = 0;
+  const PIN_MASK_R = 17;     // radius (px) of the hole cut around each pin — tune to the icon size
+
   const ensureSvg = () => {
     if (svg) return;
     svg = document.createElementNS(NS, "svg");
@@ -681,6 +691,25 @@
     });
     defsEl = document.createElementNS(NS, "defs");
     svg.appendChild(defsEl);
+    // Soft-edged radial hole used by the pin mask (solid black core -> white/visible edge, so the
+    // ribbon fades out around each battle pin instead of a hard circular cut).
+    const rg = document.createElementNS(NS, "radialGradient");
+    rg.id = "wdl-pinhole";
+    const mk = (off, col) => { const s = document.createElementNS(NS, "stop"); s.setAttribute("offset", off); s.setAttribute("stop-color", col); return s; };
+    rg.append(mk("0", "#000"), mk("0.6", "#000"), mk("1", "#fff"));
+    defsEl.appendChild(rg);
+    // The mask itself: a big white backdrop (everything visible) with black holes punched at pins.
+    const pinMask = document.createElementNS(NS, "mask");
+    pinMask.id = "wdl-pinmask";
+    pinMask.setAttribute("maskUnits", "userSpaceOnUse");
+    pinMask.setAttribute("maskContentUnits", "userSpaceOnUse");
+    const bg = document.createElementNS(NS, "rect");
+    bg.setAttribute("x", "-100000"); bg.setAttribute("y", "-100000");
+    bg.setAttribute("width", "200000"); bg.setAttribute("height", "200000");
+    bg.setAttribute("fill", "#fff");
+    pinHoles = document.createElementNS(NS, "g");
+    pinMask.append(bg, pinHoles);
+    defsEl.appendChild(pinMask);
     // Gentle breathing glow on live origin markers (see .wdl-live-halo toggle in updateBattleDraw()).
     const st = document.createElementNS(NS, "style");
     st.textContent =
@@ -688,6 +717,7 @@
       "#wdl-map-lines .wdl-live-halo{animation:wdl-pulse 1.6s ease-in-out infinite}";
     svg.appendChild(st);
     gAllArcs = document.createElementNS(NS, "g");
+    gAllArcs.setAttribute("mask", "url(#wdl-pinmask)"); // ribbons pass behind the on-canvas battle pins
     svg.appendChild(gAllArcs);
     gAllNodes = document.createElementNS(NS, "g"); // origin markers, painted above ALL ribbons
     svg.appendChild(gAllNodes);
@@ -930,8 +960,42 @@
     return { active: true, header: b.header, totals, countries: shown, targetOccluded };
   };
 
+  // Keep the pin-mask holes on top of the game's battle pins. The pins are static in geo space, so
+  // we only re-query their positions on a throttle, but reproject them every frame (they move as the
+  // map pans/zooms). If the "battle-pin" layer doesn't exist (older game build), the holes stay empty
+  // and the mask is a no-op — ribbons render exactly as before.
+  const updatePinMask = () => {
+    if (!pinHoles) return;
+    const real = wdlMap();
+    if (!real || typeof real.project !== "function") return;
+    const now = Date.now();
+    if (now - lastPinQuery > 300) {
+      lastPinQuery = now;
+      try {
+        const feats = real.queryRenderedFeatures({ layers: ["battle-pin"] });
+        pinCoords = feats.map((f) => f && f.geometry && f.geometry.coordinates).filter(Boolean);
+      } catch (_) { /* layer absent — leave pinCoords as-is / empty */ }
+    }
+    for (let i = 0; i < pinCoords.length; i++) {
+      let c = pinCircles[i];
+      if (!c) {
+        c = document.createElementNS(NS, "circle");
+        c.setAttribute("r", String(PIN_MASK_R));
+        c.setAttribute("fill", "url(#wdl-pinhole)");
+        pinHoles.appendChild(c);
+        pinCircles[i] = c;
+      }
+      const p = real.project(pinCoords[i]);
+      c.setAttribute("cx", p.x);
+      c.setAttribute("cy", p.y);
+      c.style.display = "";
+    }
+    for (let i = pinCoords.length; i < pinCircles.length; i++) pinCircles[i].style.display = "none";
+  };
+
   const draw = (doPost) => {
     if (!ready || !svg) return;
+    updatePinMask();
     const watched = watchedBattleIds();
 
     // Drop draw state for battles no longer watched by any panel.
