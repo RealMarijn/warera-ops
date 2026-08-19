@@ -33,8 +33,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlEngine = "0.19.0"; } catch (_) {}
-  console.log("[WDL] map.js engine v0.19.0 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlEngine = "0.20.0"; } catch (_) {}
+  console.log("[WDL] map.js engine v0.20.0 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const NS = "http://www.w3.org/2000/svg";
@@ -762,6 +762,65 @@
     return left + right + " Z";
   };
 
+  // ---- globe-mode arcs: hug the sphere instead of cutting through it ------
+  // ribbonPath() above draws a 2D bezier between the two PROJECTED screen
+  // points — fine on a flat map, but on the globe two points on the visible
+  // (near-camera) surface project to screen positions such that a straight-
+  // ish 2D curve between them visually dips below the sphere's curvature,
+  // reading as if the line goes "through" the globe instead of over its
+  // surface (confirmed by the user, worse the further apart the two
+  // countries are). Fix: sample points along the actual GREAT-CIRCLE path
+  // on the sphere surface (via spherical interpolation in lng/lat, not
+  // screen space) and project EACH sample individually — every point is
+  // then genuinely on the sphere, so the resulting on-screen curve follows
+  // its true visible silhouette.
+  const GLOBE_ARC_SAMPLES = 20;
+  const lngLatToVec3 = (lngLat) => {
+    const { lng, lat } = toLngLat(lngLat);
+    const lngR = lng * Math.PI / 180, latR = lat * Math.PI / 180;
+    const cosLat = Math.cos(latR);
+    return [cosLat * Math.cos(lngR), cosLat * Math.sin(lngR), Math.sin(latR)];
+  };
+  const vec3ToLngLat = ([x, y, z]) => [
+    Math.atan2(y, x) * 180 / Math.PI,
+    Math.asin(Math.max(-1, Math.min(1, z))) * 180 / Math.PI,
+  ];
+  // Spherical linear interpolation ("slerp") between two [lng,lat] points —
+  // the great-circle equivalent of a straight-line lerp, needed because a
+  // plain lng/lat lerp doesn't follow the sphere surface (it cuts corners
+  // near the poles/antimeridian the same way a flat lerp would on a globe).
+  const slerpLngLat = (A, B, t) => {
+    const a = lngLatToVec3(A), b = lngLatToVec3(B);
+    const dot = Math.max(-1, Math.min(1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2]));
+    const theta = Math.acos(dot);
+    if (theta < 1e-6) return A; // coincident (or effectively so) — nothing to interpolate
+    const sinTheta = Math.sin(theta);
+    const wa = Math.sin((1 - t) * theta) / sinTheta, wb = Math.sin(t * theta) / sinTheta;
+    return vec3ToLngLat([a[0] * wa + b[0] * wb, a[1] * wa + b[1] * wb, a[2] * wa + b[2] * wb]);
+  };
+  // Same tapered-ribbon shape as ribbonPath, but built from real projected
+  // points along the great circle (A/B here are [lng,lat], not screen {x,y}).
+  const ribbonPathGlobe = (A, B, wMax) => {
+    const real = wdlMap();
+    const pts = [];
+    for (let i = 0; i <= GLOBE_ARC_SAMPLES; i++) {
+      const t = i / GLOBE_ARC_SAMPLES;
+      const p = real.project(slerpLngLat(A, B, t));
+      pts.push({ x: p.x, y: p.y, t });
+    }
+    let left = "", right = "";
+    for (let i = 0; i < pts.length; i++) {
+      const cur = pts[i], prev = pts[i - 1] || cur, next = pts[i + 1] || cur;
+      const tx = next.x - prev.x, ty = next.y - prev.y;
+      const tl = Math.hypot(tx, ty) || 1;
+      const ux = -ty / tl, uy = tx / tl;
+      const w = (2.4 + Math.pow(cur.t, 1.4) * wMax) / 2;
+      left += (i ? " L " : "M ") + (cur.x + ux * w) + " " + (cur.y + uy * w);
+      right = " L " + (cur.x - ux * w) + " " + (cur.y - uy * w) + right;
+    }
+    return left + right + " Z";
+  };
+
   // Recompute one battle's arcs/nodes for the current frame. Runs for EVERY watched battle every
   // tick, active or not — that's what makes switching the active panel instant (see file header).
   // Returns a snapshot used both to decide what's drawn and to build panel summaries.
@@ -831,7 +890,12 @@
       const color = r.side === "attacker" ? ATT : DEF;
       const wMax = 2 + (r.rate / maxRate) * 9;
       const live_ = r.rate > 0;
-      e.path.setAttribute("d", ribbonPath(cp, tp, wMax));
+      // On the globe, a 2D screen-space bezier between the two projected
+      // points cuts across the visible disk instead of following the
+      // sphere's curvature — sample the real great-circle path instead (see
+      // ribbonPathGlobe). Flat/mercator mode keeps the existing 2D bezier,
+      // which already looks right there and is cheaper to compute.
+      e.path.setAttribute("d", isGlobeMode() ? ribbonPathGlobe(r.pos, target, wMax) : ribbonPath(cp, tp, wMax));
       // gradient runs from source (clearly visible) to region (brightest), following the line
       e.grad.setAttribute("x1", cp.x); e.grad.setAttribute("y1", cp.y);
       e.grad.setAttribute("x2", tp.x); e.grad.setAttribute("y2", tp.y);
