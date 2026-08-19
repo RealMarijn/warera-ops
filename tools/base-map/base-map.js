@@ -18,8 +18,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wbmEngine = "0.4.0"; } catch (_) {}
-  console.log("[WBM] base-map.js engine v0.4.0 loaded");
+  try { document.documentElement.dataset.wbmEngine = "0.5.0"; } catch (_) {}
+  console.log("[WBM] base-map.js engine v0.5.0 loaded");
 
   const CHANNEL = "warera-base-map";
   const NS = "http://www.w3.org/2000/svg";
@@ -114,16 +114,44 @@
     }
   };
 
-  // ---- badge layout (bases + bunkers, this engine's own two layers) -----
-  // Symmetric pair centered on (0,0), so a region with BOTH a base and a
-  // bunker reads as two badges centered as a GROUP on the region rather than
-  // one badge landing dead-center and the other bumped off to a side.
-  const PAIR_OFFSET = { bases: [-10, 0], bunkers: [10, 0] };
-  let activeRegionsByLayer = { bases: new Set(), bunkers: new Set() };
-  const badgeOffset = (layer, regionId) => {
-    const other = layer === "bases" ? "bunkers" : "bases";
-    return activeRegionsByLayer[other].has(regionId) ? PAIR_OFFSET[layer] : [0, 0];
+  // ---- cross-engine badge layout (shared with tools/sr-map/sr-map.js) ---
+  // Bases, bunkers and strategic resources are drawn by two INDEPENDENT
+  // MAIN-world engines (this file, and sr-map.js) that otherwise know
+  // nothing about each other — but they run in the same page realm, so a
+  // plain window global is the simplest way for them to agree on how many
+  // badge "slots" a given region needs and which slot is this engine's,
+  // without either one owning the other's data. Each engine publishes the
+  // set of regionIds it currently has a badge on for each of its own layer
+  // keys; badgeOffset() below reads ALL engines' published sets to place its
+  // own badge relative to true region center instead of a hardcoded fixed
+  // offset (which used to shift bases/bunkers off-center even when no other
+  // badge was present in that region at all).
+  const BADGE_TYPES = ["bases", "bunkers", "sr"];
+  const badgeRegistry = (window.__wdlBadgeRegistry = window.__wdlBadgeRegistry || {
+    bases: new Set(), bunkers: new Set(), sr: new Set(),
+  });
+  const sameSet = (a, b) => a.size === b.size && [...a].every((x) => b.has(x));
+  const publishBadgeRegions = (updates) => {
+    let changed = false;
+    for (const key in updates) {
+      if (!sameSet(badgeRegistry[key] || new Set(), updates[key])) changed = true;
+    }
+    Object.assign(badgeRegistry, updates);
+    if (changed) window.dispatchEvent(new CustomEvent("wdl-badge-registry-changed"));
   };
+  // Equilateral-ish triangle / symmetric pair, centered on (0,0) so the GROUP
+  // of badges reads as centered on the region even though no single badge
+  // sits exactly on the point anymore.
+  const BADGE_OFFSET_PAIR = [[-10, 0], [10, 0]];
+  const BADGE_OFFSET_TRIANGLE = [[0, -11], [-9.5, 6], [9.5, 6]];
+  const badgeOffset = (myKey, regionId) => {
+    const present = BADGE_TYPES.filter((k) => badgeRegistry[k] && badgeRegistry[k].has(regionId));
+    const idx = present.indexOf(myKey);
+    if (idx === -1 || present.length <= 1) return [0, 0];
+    if (present.length === 2) return BADGE_OFFSET_PAIR[idx];
+    return BADGE_OFFSET_TRIANGLE[idx];
+  };
+  window.addEventListener("wdl-badge-registry-changed", () => draw());
 
   // ---- SVG overlay inside the map container -----------------------------
   let svg, gBadges;
@@ -309,7 +337,10 @@
       b.d = d;
       updateBadge(b, d);
     }
-    activeRegionsByLayer = activeByLayer;
+    // Publish before draw() so this same call's own positioning already sees
+    // the up-to-date set (and so sr-map.js, listening for the change event,
+    // repositions its own badges around ours too).
+    publishBadgeRegions({ bases: activeByLayer.bases, bunkers: activeByLayer.bunkers });
     draw();
   };
 

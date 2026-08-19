@@ -8,6 +8,7 @@ const toggles = [
   { el: document.getElementById("toggle-dmg"), key: "wdlEnabled", defaultOn: true },
   // Off by default — a bigger visual change to the map than the others, opt-in.
   { el: document.getElementById("toggle-core-colors"), key: "coreColorsEnabled", defaultOn: false },
+  { el: document.getElementById("toggle-sr"), key: "srMapEnabled", defaultOn: false },
   { el: document.getElementById("toggle-bases"), key: "showBasesEnabled", defaultOn: false },
   { el: document.getElementById("toggle-bunkers"), key: "showBunkersEnabled", defaultOn: false },
 ];
@@ -27,10 +28,10 @@ for (const t of toggles) {
 }
 
 // ── "Map features" collapsible group ──────────────────────────────────────
-// Core-country-colors, bases and bunkers all live under a single expandable
-// section. The header shows how many of them are on so the state is visible
-// while the group is collapsed (its default).
-const mapFeatureKeys = ["coreColorsEnabled", "showBasesEnabled", "showBunkersEnabled"];
+// Strategic resources, core-country-colors, bases and bunkers all live under
+// a single expandable section. The header shows how many of them are on so
+// the state is visible while the group is collapsed (its default).
+const mapFeatureKeys = ["srMapEnabled", "coreColorsEnabled", "showBasesEnabled", "showBunkersEnabled"];
 const mapFeatureEls = mapFeatureKeys
   .map((key) => toggles.find((t) => t.key === key)?.el)
   .filter(Boolean);

@@ -51,15 +51,21 @@
     },
     {
       "matches": ["https://app.warera.io/*"],
-      "js": ["tools/dmg-lines/hook.js", "tools/dmg-lines/map.js", "tools/base-map/base-map.js"],
+      "js": ["tools/dmg-lines/hook.js", "tools/dmg-lines/map.js", "tools/sr-map/sr-map.js", "tools/base-map/base-map.js"],
       "run_at": "document_start",
       "world": "MAIN"
     },
     {
       "matches": ["https://app.warera.io/*"],
-      "js": ["tools/dmg-lines/overlay.js", "tools/base-map/base-overlay.js"],
+      "js": ["tools/dmg-lines/overlay.js", "tools/sr-map/sr-overlay.js", "tools/base-map/base-overlay.js"],
       "run_at": "document_start",
       "world": "ISOLATED"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["assets/images/*"],
+      "matches": ["<all_urls>"]
     }
   ]
 }
