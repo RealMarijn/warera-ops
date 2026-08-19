@@ -14,10 +14,17 @@
   // renders (e.g. countryWealth) — this page was asked for specific stats, not "everything missing".
   const ALLOWED_RANKING_KEYS = new Set(["countryRegionDiff", "countryBounty"]);
 
+  // Simple "$" coin glyph, stroke-based like the rest of these icons — shared by
+  // all three tax tiles, differentiated by label/tooltip only.
+  const TAX_ICON = `<circle cx="12" cy="12" r="9"></circle><line x1="12" y1="7" x2="12" y2="17"></line><path d="M15 9.5c0-1.5-1.3-2.5-3-2.5s-3 1-3 2.2c0 1.1.9 1.6 2 1.9l2 .5c1.1.3 2 .8 2 1.9 0 1.2-1.3 2.2-3 2.2s-3-1-3-2.5"></path>`;
+
   const ICONS = {
     countryBounty: `<circle cx="12" cy="12" r="9"></circle><circle cx="12" cy="12" r="5"></circle><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"></circle>`,
     countryRegionDiff: `<path d="M12 3l9 18H3z"></path>`,
     currentPopulation: `<path d="M12,5.5A3.5,3.5 0 0,1 15.5,9A3.5,3.5 0 0,1 12,12.5A3.5,3.5 0 0,1 8.5,9A3.5,3.5 0 0,1 12,5.5M5,8C5.56,8 6.08,8.15 6.53,8.42C6.38,9.85 6.8,11.27 7.66,12.38C7.16,13.34 6.16,14 5,14A3,3 0 0,1 2,11A3,3 0 0,1 5,8M19,8A3,3 0 0,1 22,11A3,3 0 0,1 19,14C17.84,14 16.84,13.34 16.34,12.38C17.2,11.27 17.62,9.85 17.47,8.42C17.92,8.15 18.44,8 19,8M5.5,18.25C5.5,16.18 8.41,14.5 12,14.5C15.59,14.5 18.5,16.18 18.5,18.25V20H5.5V18.25M0,20V18.5C0,17.11 1.89,15.94 4.45,15.6C3.86,16.28 3.5,17.22 3.5,18.25V20H0M24,20H20.5V18.25C20.5,17.22 20.14,16.28 19.55,15.6C22.11,15.94 24,17.11 24,18.5V20Z" fill="currentColor" stroke="none"></path>`,
+    taxDaily: TAX_ICON,
+    taxWeekly: TAX_ICON,
+    taxMonthly: TAX_ICON,
   };
   const DEFAULT_ICON = `<circle cx="12" cy="12" r="9"></circle><path d="M12 7v6l4 2"></path>`;
 
@@ -25,23 +32,89 @@
     countryBounty: "Country Bounty",
     countryRegionDiff: "Region Diff",
     currentPopulation: "Current Population",
+    taxDaily: "Daily Tax",
+    taxWeekly: "Weekly Tax",
+    taxMonthly: "Monthly Tax",
   };
 
-  // currentPopulation isn't a real leaderboard category — clicking it shouldn't navigate.
-  const NON_NAVIGABLE_KEYS = new Set(["currentPopulation"]);
+  // currentPopulation/tax tiles aren't real leaderboard categories — clicking shouldn't navigate.
+  const NON_NAVIGABLE_KEYS = new Set(["currentPopulation", "taxDaily", "taxWeekly", "taxMonthly"]);
 
-  // Tiles with no rank/tier of their own (currentPopulation) instead borrow the color of
-  // whichever real, currently-visible tile is named here.
-  const COLOR_SOURCE_KEY = { currentPopulation: "countryActivePopulation" };
+  // Tiles with no rank/tier of their own instead borrow the color of whichever
+  // real, currently-visible tile is named here.
+  const COLOR_SOURCE_KEY = {
+    currentPopulation: "countryActivePopulation",
+    taxDaily: "countryBounty",
+    taxWeekly: "countryBounty",
+    taxMonthly: "countryBounty",
+  };
+
+  // Backend-derived tax revenue (see BACKEND_API.md's countries/tax entry) —
+  // proprietary data WarEra's own API doesn't expose, so unlike everything
+  // else on this page it needs a whitelist-gated fetch through background.js
+  // rather than a plain WARERA_OPS_FETCH. Windows are inclusive of today's
+  // still-filling-in bucket, matching the Nigeria bot's /fabrieken command
+  // this data also feeds.
+  const TAX_WINDOW_DAYS = { taxDaily: 1, taxWeekly: 7, taxMonthly: 30 };
+  const TAX_WINDOW_LABEL = { taxDaily: "today", taxWeekly: "over the last 7 days", taxMonthly: "over the last 30 days" };
+  const TAX_FIELD = { taxDaily: "d", taxWeekly: "w", taxMonthly: "m" };
+
+  function formatTrackedSince(iso) {
+    try {
+      return new Date(iso).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Hover text for a tax tile — the "since when do you even store this"
+  // context the user asked for, surfaced only where it actually matters
+  // (a window not yet fully covered by however long tracking has been running).
+  function taxTooltip(key) {
+    const startedAt = state.tax?.startedAt;
+    if (!startedAt) return null;
+    const since = formatTrackedSince(startedAt);
+    const windowDays = TAX_WINDOW_DAYS[key];
+    const daysTracked = Math.floor((Date.now() - new Date(startedAt).getTime()) / 86_400_000) + 1;
+    if (since && daysTracked < windowDays) {
+      return `Tax collected ${TAX_WINDOW_LABEL[key]}. Only tracked since ${since} so far ` +
+        `(${daysTracked} day${daysTracked === 1 ? "" : "s"} of data) — doesn't cover the full window yet.`;
+    }
+    return since ? `Tax collected ${TAX_WINDOW_LABEL[key]}. Tracked since ${since}.` : null;
+  }
 
   // Extra stats pulled from top-level payload fields rather than `rankings.*` (no rank/tier data).
-  const EXTRA_TILES = [{ key: "currentPopulation", getValue: () => state.payload?.currentPopulation }];
+  const EXTRA_TILES = [
+    { key: "currentPopulation", getValue: () => state.payload?.currentPopulation },
+    {
+      key: "taxDaily",
+      getValue: () => roundOrUndefined(state.tax?.entry?.[TAX_FIELD.taxDaily]),
+      getTooltip: () => taxTooltip("taxDaily"),
+    },
+    {
+      key: "taxWeekly",
+      getValue: () => roundOrUndefined(state.tax?.entry?.[TAX_FIELD.taxWeekly]),
+      getTooltip: () => taxTooltip("taxWeekly"),
+    },
+    {
+      key: "taxMonthly",
+      getValue: () => roundOrUndefined(state.tax?.entry?.[TAX_FIELD.taxMonthly]),
+      getTooltip: () => taxTooltip("taxMonthly"),
+    },
+  ];
+
+  function roundOrUndefined(v) {
+    return typeof v === "number" ? Math.round(v) : undefined;
+  }
 
   const state = {
     countryId: null,
     rankings: undefined, // undefined = not fetched yet, null = fetched but absent/failed, object once loaded
     payload: null,
     fetching: false,
+    // undefined = not fetched yet, null = fetched but no data for this country (or logged out/failed),
+    // { startedAt, entry: { d, w, m } } once loaded.
+    tax: undefined,
   };
 
   let active = false;
@@ -140,6 +213,7 @@
 
       labelSpan.textContent = LABELS[key] || key;
       numberSpan.textContent = formatNumber(stat?.value ?? null);
+      if (stat?.tooltip) tile.title = stat.tooltip;
       iconDiv.innerHTML = `
         <svg viewBox="0 0 24 24" style="width:1em;height:1em;font-size:120%;filter:drop-shadow(black 1px 1px 0px);" fill="none" stroke="currentColor" stroke-width="2">
           ${ICONS[key] || DEFAULT_ICON}
@@ -187,6 +261,25 @@
     return tile;
   }
 
+  // Tax revenue — whitelist-gated backend call, kept separate from the public
+  // rankings fetch below so a slow/failing/logged-out backend never blocks
+  // the tiles that don't need it. "not_logged_in" (and any other failure) is
+  // just treated as "no tax data" — the tiles simply don't appear, same as a
+  // country with nothing collected, rather than showing an error.
+  async function fetchTax(countryId) {
+    try {
+      const data = await browser.runtime.sendMessage({
+        type: "WARERA_OPS_AUTHED_FETCH",
+        path: "/api/ext/countries/tax",
+        method: "GET",
+      });
+      const entry = data?.countries?.[countryId];
+      state.tax = entry ? { startedAt: data.startedAt || null, entry } : null;
+    } catch (err) {
+      state.tax = null; // not logged in / not whitelisted / network failure — feature just doesn't show
+    }
+  }
+
   async function ensureRankingsFetched(countryId) {
     if (state.countryId === countryId && state.rankings !== undefined) return;
     if (state.fetching) return;
@@ -194,6 +287,7 @@
     state.countryId = countryId;
     state.rankings = undefined;
     state.payload = null;
+    state.tax = undefined;
 
     // WarEra's client-side router swaps the grid's real tiles but leaves our injected ones
     // alone (React doesn't know about them) — clear them now so stale numbers from the
@@ -201,14 +295,21 @@
     document.querySelectorAll(`[${MARKER_ATTR}]`).forEach((el) => el.remove());
 
     try {
-      const raw = await browser.runtime.sendMessage({
-        type: "WARERA_OPS_FETCH",
-        endpoint: "country.getCountryById",
-        params: { countryId },
-      });
-      const payload = raw?.result?.data ?? raw;
-      state.payload = payload ?? null;
-      state.rankings = payload?.rankings ?? null;
+      const [rankingsResult] = await Promise.allSettled([
+        browser.runtime.sendMessage({
+          type: "WARERA_OPS_FETCH",
+          endpoint: "country.getCountryById",
+          params: { countryId },
+        }),
+        fetchTax(countryId), // sets state.tax itself; failure here shouldn't fail the rankings fetch
+      ]);
+      if (rankingsResult.status === "fulfilled") {
+        const payload = rankingsResult.value?.result?.data ?? rankingsResult.value;
+        state.payload = payload ?? null;
+        state.rankings = payload?.rankings ?? null;
+      } else {
+        throw rankingsResult.reason;
+      }
     } catch (err) {
       console.error("[WarEra Ops] failed to fetch country data", err);
       state.rankings = null;
@@ -263,7 +364,8 @@
     }
     for (const key of missingExtraKeys) {
       const extra = EXTRA_TILES.find((e) => e.key === key);
-      grid.appendChild(buildTile(reference, key, { value: extra.getValue() }, palette));
+      const tooltip = extra.getTooltip ? extra.getTooltip() : undefined;
+      grid.appendChild(buildTile(reference, key, { value: extra.getValue(), tooltip }, palette));
     }
   }
 

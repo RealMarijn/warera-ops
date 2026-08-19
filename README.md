@@ -13,7 +13,7 @@ A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats to t
 
 ### Country & MU
 
-- **Country pages** — adds Region Diff, Country Bounty, and Current Population ranking tiles.
+- **Country pages** — adds Region Diff, Country Bounty, and Current Population ranking tiles, plus Daily/Weekly/Monthly Tax Revenue tiles (whitelist-gated — sign in with Discord in the popup to see these).
 - **MU pages** — adds Bounty and Invested Money ranking tiles.
 - **Country/MU account pages** — shows total inventory value (money plus all items at current market price).
 
