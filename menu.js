@@ -185,7 +185,7 @@ setInterval(() => {
 }, 4000);
 
 const DENY_REASONS = {
-  not_whitelisted: "That Discord account isn't on the WarEra Ops whitelist.",
+  not_whitelisted: "That Discord account isn't on the WarEra Ops whitelist. To request access, message RealMarijn on Discord or in-game.",
   expired: "Login link expired — try again.",
   timeout: "Login timed out — try again.",
   start_failed: "Couldn't reach the backend — try again.",
