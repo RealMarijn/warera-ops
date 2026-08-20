@@ -22,8 +22,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlPanel = "1.12.0"; } catch (_) {}
-  console.log("[WDL] overlay.js panel v1.12.0 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlPanel = "1.13.0"; } catch (_) {}
+  console.log("[WDL] overlay.js panel v1.13.0 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const FLAG = (code) => `https://media.warera.io/images/flags/${code}.svg?v=16`;
@@ -47,6 +47,15 @@
   const esc = (s) => String(s == null ? "" : s).replace(/[<>&"]/g, (c) =>
     ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
   const flagImg = (c) => (c && c.code) ? `<img class="fl" src="${FLAG(c.code)}" alt="">` : `<span class="fl"></span>`;
+  // Blends two #rrggbb colors by t (0 = hex1, 1 = hex2) — used for the "Country damage" window's
+  // amount text, which (unlike a tracker row) doesn't have a single fixed attacker/defender side.
+  const blendHex = (hex1, hex2, t) => {
+    const c1 = parseInt(hex1.slice(1), 16), c2 = parseInt(hex2.slice(1), 16);
+    const r = Math.round(((c1 >> 16) & 255) + (((c2 >> 16) & 255) - ((c1 >> 16) & 255)) * t);
+    const g = Math.round(((c1 >> 8) & 255) + (((c2 >> 8) & 255) - ((c1 >> 8) & 255)) * t);
+    const b = Math.round((c1 & 255) + ((c2 & 255) - (c1 & 255)) * t);
+    return `rgb(${r},${g},${b})`;
+  };
 
   // ---- shared (cross-panel) state ----------------------------------------
   let enabled = true;
@@ -945,8 +954,8 @@
     .lst.grown { max-height:none; flex:1 1 auto; overflow-y:auto; }
     .r { display:flex; align-items:center; gap:8px; font-size:12px; margin:4px 0 1px; }
     .r .nm { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .r .amt { font-weight:700; color:#ffcc44; font-variant-numeric:tabular-nums; }
-    .bar { height:3px; border-radius:2px; background:#ffcc44; }
+    .r .amt { font-weight:700; font-variant-numeric:tabular-nums; }
+    .bar { height:3px; border-radius:2px; }
     .empty { opacity:.55; font-size:11px; padding:10px 2px; text-align:center; line-height:1.4; flex:none; }
     .uncollapse { all:unset; display:block; box-sizing:border-box; width:100%; text-align:center;
       margin-top:6px; padding:4px 8px; font:inherit; font-size:10.5px; opacity:.7; cursor:pointer;
@@ -1199,9 +1208,16 @@
       els.tot.textContent = `${targets.length} battle${targets.length > 1 ? "s" : ""} · ${fmt(d.total)} total`;
       els.lst.hidden = false;
       const max = Math.max(1, ...targets.map((t) => t.damage));
-      els.lst.innerHTML = targets.map((t) =>
-        `<div><div class="r"><span class="nm">${esc(t.regionName || "?")}</span><span class="amt">${fmt(t.damage)}</span></div>` +
-        `<div class="bar" style="width:${Math.max(3, (t.damage / max) * 100)}%"></div></div>`).join("");
+      els.lst.innerHTML = targets.map((t) => {
+        // ratio = attacker-side fraction of this battle's damage (see map.js) — the bar gets a
+        // hard red/blue split at that point, same idea as the map lines; the amount text gets a
+        // blended color since text can't be split the same way.
+        const ratio = Math.max(0, Math.min(1, t.ratio ?? 0.5));
+        const pct = (ratio * 100).toFixed(1);
+        const amtColor = blendHex(ATT, DEF, 1 - ratio);
+        return `<div><div class="r"><span class="nm">${esc(t.regionName || "?")}</span><span class="amt" style="color:${amtColor}">${fmt(t.damage)}</span></div>` +
+          `<div class="bar" style="width:${Math.max(3, (t.damage / max) * 100)}%;background:linear-gradient(to right, ${ATT} ${pct}%, ${DEF} ${pct}%)"></div></div>`;
+      }).join("");
     };
 
     // Ticks the "time until the next refresh" label in the header every second.

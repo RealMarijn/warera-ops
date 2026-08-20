@@ -33,8 +33,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlEngine = "0.24.0"; } catch (_) {}
-  console.log("[WDL] map.js engine v0.24.0 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlEngine = "0.25.0"; } catch (_) {}
+  console.log("[WDL] map.js engine v0.25.0 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const NS = "http://www.w3.org/2000/svg";
@@ -726,8 +726,12 @@
   //   sel: countryId|null,
   //   window: "total"|"now",
   //   nowBaseline: Map<battleId,rawDmg>|null,
-  //   targets: Map<battleId,{region,damage}>,  // WINDOWED, damage>0 entries only
-  //   prevDmg: Map<battleId,rawDmg>,            // RAW — pulse-detection source + the "now" baseline
+  //   nowSplitBaseline: Map<battleId,{att,def}>|null,  // attacker/defender split at "now"'s click
+  //   targets: Map<battleId,{region,damage,ratio}>,    // WINDOWED — damage>0 entries only; ratio is
+  //                                                     // the attacker-side fraction (0..1) of that
+  //                                                     // entry's windowed damage, for red/blue coloring
+  //   prevDmg: Map<battleId,rawDmg>,            // RAW total — pulse-detection source + "now" baseline
+  //   prevSplit: Map<battleId,{att,def}>,       // RAW attacker/defender split, latest known per battle
   //   pulseUntil: Map<battleId,ts>,
   //   nextFullAt: number,                       // drives that window's own refresh countdown
   //   fastTimer, fullTimer,
@@ -736,8 +740,8 @@
     let p = countryPanels.get(panelId);
     if (!p) {
       p = {
-        sel: null, window: "total", nowBaseline: null,
-        targets: new Map(), prevDmg: new Map(), pulseUntil: new Map(),
+        sel: null, window: "total", nowBaseline: null, nowSplitBaseline: null,
+        targets: new Map(), prevDmg: new Map(), prevSplit: new Map(), pulseUntil: new Map(),
         nextFullAt: 0, fastTimer: null, fullTimer: null,
       };
       countryPanels.set(panelId, p);
@@ -1097,7 +1101,8 @@
     for (const id of [...activeBattleIndex.keys()]) if (!ids.has(id)) activeBattleIndex.delete(id);
   };
 
-  // A window's country's damage in one battle (merged ranking lists every country on both sides).
+  // A window's country's damage in one battle (merged ranking lists every country on both sides —
+  // cheap discovery pass, used first to decide whether this battle is worth showing at all).
   const fetchCountryDamage = async (battleId, cid) => {
     try {
       const d = await trpcRaw("battleRanking.getRanking", { battleId, type: "country", dataType: "damage", side: "merged" });
@@ -1105,6 +1110,36 @@
       const row = items.find((x) => x.country === cid);
       return row ? (row.value || 0) : 0;
     } catch (_) { return 0; }
+  };
+
+  // The attacker/defender split of a country's damage in one battle — only fetched for battles
+  // that already came back with nonzero merged damage (see scanCountryDamage below), so this
+  // doesn't double the request volume of the ~80-battle discovery pass, only the much smaller set
+  // of battles actually worth drawing. Used to color that battle's line/bar red-vs-blue instead of
+  // the flat yellow the merged total alone can't distinguish.
+  const fetchCountrySideSplit = async (battleId, cid) => {
+    try {
+      const [attD, defD] = await Promise.all([
+        trpcRaw("battleRanking.getRanking", { battleId, type: "country", dataType: "damage", side: "attacker" }),
+        trpcRaw("battleRanking.getRanking", { battleId, type: "country", dataType: "damage", side: "defender" }),
+      ]);
+      const attRow = ((attD && attD.items) || []).find((x) => x.country === cid);
+      const defRow = ((defD && defD.items) || []).find((x) => x.country === cid);
+      return { att: attRow ? (attRow.value || 0) : 0, def: defRow ? (defRow.value || 0) : 0 };
+    } catch (_) { return { att: 0, def: 0 }; }
+  };
+
+  // Two-stage scan shared by the fast/full tiers: cheap merged-damage discovery across `ids`, then
+  // the (attacker/defender) split fetched only for whichever came back nonzero.
+  const scanCountryDamage = async (ids, sel) => {
+    const raw = await mapLimit(ids, RANK_CONCURRENCY, async (id) => ({ id, dmg: await fetchCountryDamage(id, sel) }));
+    const hitIds = raw.filter((r) => r.dmg > 0).map((r) => r.id);
+    const splits = await mapLimit(hitIds, RANK_CONCURRENCY, async (id) => ({ id, split: await fetchCountrySideSplit(id, sel) }));
+    const splitById = new Map(splits.map((s) => [s.id, s.split]));
+    return raw.map((r) => {
+      const s = splitById.get(r.id) || { att: 0, def: 0 };
+      return { id: r.id, dmg: r.dmg, att: s.att, def: s.def };
+    });
   };
 
   // Turns a battle's RAW (all-time cumulative) damage into whatever that window's currently
@@ -1116,16 +1151,39 @@
     return Math.max(0, rawDmg - base);
   };
 
-  // Rebuilds a window's targets from its last known RAW per-battle totals (p.prevDmg) under its
-  // current display window — used to give instant feedback when the user switches Total/Now,
-  // without waiting for the next scan.
+  // Same idea as windowedDamage but for the attacker/defender split, so "now" mode's color ratio
+  // reflects only damage dealt since the click too, not the battle's all-time split.
+  const windowedSplit = (p, battleId, rawSplit) => {
+    if (p.window !== "now") return rawSplit;
+    const base = p.nowSplitBaseline ? p.nowSplitBaseline.get(battleId) : null;
+    return {
+      att: Math.max(0, rawSplit.att - (base ? base.att : 0)),
+      def: Math.max(0, rawSplit.def - (base ? base.def : 0)),
+    };
+  };
+
+  // Attacker-side fraction (0..1) of a split — what the red/blue line & bar coloring is based on.
+  // Defaults to an even 0.5 split when there's nothing to go on (shouldn't normally happen for a
+  // battle with damage>0, but guards against a split fetch that failed/came back empty).
+  const ratioOf = (split) => {
+    const sum = split.att + split.def;
+    return sum > 0 ? split.att / sum : 0.5;
+  };
+
+  // Rebuilds a window's targets from its last known RAW per-battle totals (p.prevDmg/p.prevSplit)
+  // under its current display window — used to give instant feedback when the user switches
+  // Total/Now, without waiting for the next scan.
   const recomputeCountryPanelTargets = (p) => {
     for (const [id, rawDmg] of p.prevDmg) {
       const idx = activeBattleIndex.get(id);
       if (!idx) { p.targets.delete(id); continue; }
       const shown = windowedDamage(p, id, rawDmg);
-      if (shown > 0) p.targets.set(id, { region: idx.region, damage: shown });
-      else p.targets.delete(id);
+      if (shown > 0) {
+        const split = windowedSplit(p, id, p.prevSplit.get(id) || { att: 0, def: 0 });
+        p.targets.set(id, { region: idx.region, damage: shown, ratio: ratioOf(split) });
+      } else {
+        p.targets.delete(id);
+      }
     }
   };
 
@@ -1134,13 +1192,18 @@
     if (!p || p.sel !== sel) return; // window closed, or its selection changed mid-scan
     const now = Date.now();
     let pulsed = false;
-    for (const { id, dmg } of results) {
+    for (const { id, dmg, att, def } of results) {
       const idx = activeBattleIndex.get(id);
       if (dmg > 0 && idx) {
         const prev = p.prevDmg.get(id);
+        p.prevSplit.set(id, { att, def });
         const shown = windowedDamage(p, id, dmg);
-        if (shown > 0) p.targets.set(id, { region: idx.region, damage: shown });
-        else p.targets.delete(id);
+        if (shown > 0) {
+          const split = windowedSplit(p, id, { att, def });
+          p.targets.set(id, { region: idx.region, damage: shown, ratio: ratioOf(split) });
+        } else {
+          p.targets.delete(id);
+        }
         // Pulse only on a real RAW increase from a known previous value (a genuine new hit) — not
         // on first discovery, and not tied to the displayed window ("now" can otherwise look like
         // it's not pulsing right after a reset, since the RAW total is what actually changed).
@@ -1149,6 +1212,7 @@
       } else {
         p.targets.delete(id);
         p.prevDmg.delete(id);
+        p.prevSplit.delete(id);
         p.pulseUntil.delete(id);
       }
     }
@@ -1163,7 +1227,7 @@
     if (!p || !p.sel) return;
     const sel = p.sel;
     const ids = [...activeBattleIndex.keys()];
-    const results = await mapLimit(ids, RANK_CONCURRENCY, async (id) => ({ id, dmg: await fetchCountryDamage(id, sel) }));
+    const results = await scanCountryDamage(ids, sel);
     applyCountryScan(panelId, sel, results);
   };
 
@@ -1172,7 +1236,7 @@
     if (!p || !p.sel) return;
     const sel = p.sel;
     const ids = [...activeBattleIndex.entries()].filter(([, idx]) => idx.att === sel || idx.def === sel).map(([id]) => id);
-    const results = await mapLimit(ids, RANK_CONCURRENCY, async (id) => ({ id, dmg: await fetchCountryDamage(id, sel) }));
+    const results = await scanCountryDamage(ids, sel);
     applyCountryScan(panelId, sel, results);
   };
 
@@ -1227,7 +1291,7 @@
     const sel = p ? p.sel : null;
     const targets = sel
       ? [...p.targets.entries()]
-          .map(([, t]) => ({ regionName: (regionMeta[t.region] && regionMeta[t.region].name) || null, damage: t.damage }))
+          .map(([, t]) => ({ regionName: (regionMeta[t.region] && regionMeta[t.region].name) || null, damage: t.damage, ratio: t.ratio }))
           .sort((a, b) => b.damage - a.damage)
       : [];
     window.postMessage({
@@ -1247,7 +1311,10 @@
     const p = countryPanels.get(panelId);
     if (!p) return;
     p.window = win;
-    if (win === "now") p.nowBaseline = new Map(p.prevDmg);
+    if (win === "now") {
+      p.nowBaseline = new Map(p.prevDmg);
+      p.nowSplitBaseline = new Map(p.prevSplit);
+    }
     recomputeCountryPanelTargets(p);
     if (panelId === activeCountryPanelId) drawCountry();
     postCountrySummary(panelId);
@@ -1258,8 +1325,10 @@
     p.sel = cid || null;
     p.targets.clear();
     p.prevDmg.clear();
+    p.prevSplit.clear();
     p.pulseUntil.clear();
     p.nowBaseline = null;
+    p.nowSplitBaseline = null;
     p.nextFullAt = 0;
     // Deliberately NOT resetting p.window — switching countries in the same window keeps whatever
     // time-window view was selected, same as any other display preference.
@@ -1285,15 +1354,20 @@
     const grad = document.createElementNS(NS, "linearGradient");
     grad.setAttribute("gradientUnits", "userSpaceOnUse");
     grad.id = "wdlcg-" + battleId;
+    // 4 stops instead of 2: a hard attacker(red)->defender(blue) color switch positioned at that
+    // battle's damage ratio (see drawCountry), while opacity still fades smoothly from faint at the
+    // source to solid at the region across the whole line — same fade as before, now split by color.
     const s0 = document.createElementNS(NS, "stop"); s0.setAttribute("offset", "0");
+    const sMidA = document.createElementNS(NS, "stop");
+    const sMidB = document.createElementNS(NS, "stop");
     const s1 = document.createElementNS(NS, "stop"); s1.setAttribute("offset", "1");
-    grad.append(s0, s1);
+    grad.append(s0, sMidA, sMidB, s1);
     defsEl.appendChild(grad);
     const path = document.createElementNS(NS, "path");
     path.setAttribute("fill", `url(#${grad.id})`);
     path.setAttribute("stroke", "none");
     gCountryArcs.appendChild(path);
-    return { path, grad, s0, s1 };
+    return { path, grad, s0, sMidA, sMidB, s1 };
   };
 
   const drawCountry = () => {
@@ -1324,8 +1398,14 @@
       e.path.setAttribute("d", isGlobeMode() ? ribbonPathGlobe(origin, rp, wMax) : ribbonPath(op, tp, wMax));
       e.grad.setAttribute("x1", op.x); e.grad.setAttribute("y1", op.y);
       e.grad.setAttribute("x2", tp.x); e.grad.setAttribute("y2", tp.y);
-      e.s0.setAttribute("stop-color", COUNTRY_COLOR); e.s0.setAttribute("stop-opacity", "0.30");
-      e.s1.setAttribute("stop-color", COUNTRY_COLOR); e.s1.setAttribute("stop-opacity", "0.95");
+      // Red (attacker) fades into blue (defender) at the point along the line matching this
+      // battle's damage ratio — see makeCountryArc for why this needs 4 stops, not 2.
+      const ratio = Math.max(0, Math.min(1, t.ratio));
+      const opAtRatio = (0.30 + (0.95 - 0.30) * ratio).toFixed(3);
+      e.s0.setAttribute("stop-color", ATT); e.s0.setAttribute("stop-opacity", "0.30");
+      e.sMidA.setAttribute("offset", String(ratio)); e.sMidA.setAttribute("stop-color", ATT); e.sMidA.setAttribute("stop-opacity", opAtRatio);
+      e.sMidB.setAttribute("offset", String(ratio)); e.sMidB.setAttribute("stop-color", DEF); e.sMidB.setAttribute("stop-opacity", opAtRatio);
+      e.s1.setAttribute("stop-color", DEF); e.s1.setAttribute("stop-opacity", "0.95");
       e.path.style.display = (originOcc || isOccludedOnGlobe(rp)) ? "none" : "";
       e.path.classList.toggle("wdl-cpulse", (p.pulseUntil.get(battleId) || 0) > Date.now());
     }
