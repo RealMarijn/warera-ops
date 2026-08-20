@@ -8,8 +8,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wsrPanel = "0.1.0"; } catch (_) {}
-  console.log("[WSR] sr-overlay.js panel v0.1.0 loaded");
+  try { document.documentElement.dataset.wsrPanel = "0.2.0"; } catch (_) {}
+  console.log("[WSR] sr-overlay.js panel v0.2.0 loaded");
 
   const CHANNEL = "warera-sr-map";
   const ORDER = ["coal", "gold", "uranium", "diamonds", "lithium", "rareEarths"];
@@ -25,6 +25,7 @@
   let enabled = false;
   let types = {};        // { coal:true, ... }
   let counts = {};
+  let collapsed = false; // body/hint hidden, just the header showing — not persisted across reloads
   let host, root, els;
   ORDER.forEach((k) => (types[k] = true));
 
@@ -71,15 +72,20 @@
     panel.innerHTML = `
       <div class="hdr"><span>Strategic resources</span><span class="sp"></span>
         <button data-act="all" title="Show all">All</button>
-        <button data-act="none" title="Hide all">None</button></div>
+        <button data-act="none" title="Hide all">None</button>
+        <button data-act="collapse" title="Collapse">▾</button></div>
       <div class="body"></div>
       <div class="hint">Click a resource to toggle it on the map. Country colours stay visible.</div>`;
     root.appendChild(panel);
     document.documentElement.appendChild(host);
 
-    els = { panel, body: panel.querySelector(".body"), hdr: panel.querySelector(".hdr") };
+    els = {
+      panel, body: panel.querySelector(".body"), hdr: panel.querySelector(".hdr"),
+      hint: panel.querySelector(".hint"), collapseBtn: panel.querySelector('[data-act="collapse"]'),
+    };
     panel.querySelector('[data-act="all"]').addEventListener("click", () => setAll(true));
     panel.querySelector('[data-act="none"]').addEventListener("click", () => setAll(false));
+    els.collapseBtn.addEventListener("click", () => setCollapsed(!collapsed));
     els.body.addEventListener("click", (e) => {
       const row = e.target.closest("[data-res]");
       if (row) toggleType(row.getAttribute("data-res"));
@@ -87,6 +93,14 @@
     makeDraggable(panel, els.hdr);
     renderRows();
     restore(panel);
+  };
+
+  const setCollapsed = (on) => {
+    collapsed = on;
+    els.body.style.display = on ? "none" : "";
+    els.hint.style.display = on ? "none" : "";
+    els.collapseBtn.textContent = on ? "▸" : "▾";
+    els.collapseBtn.title = on ? "Expand" : "Collapse";
   };
 
   const renderRows = () => {

@@ -22,8 +22,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlPanel = "1.13.0"; } catch (_) {}
-  console.log("[WDL] overlay.js panel v1.13.0 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlPanel = "1.13.1"; } catch (_) {}
+  console.log("[WDL] overlay.js panel v1.13.1 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const FLAG = (code) => `https://media.warera.io/images/flags/${code}.svg?v=16`;
@@ -946,6 +946,8 @@
       border:1px solid rgba(255,255,255,.14); border-radius:5px; opacity:.75; box-sizing:border-box; }
     .wins button:hover { opacity:1; }
     .wins button.active { background:rgba(255,204,68,.16); border-color:rgba(255,204,68,.5); opacity:1; color:#ffcc44; }
+    .sincenow[hidden] { display:none; }
+    .sincenow { font-size:10px; opacity:.6; margin-top:5px; text-align:center; flex:none; }
     .out { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; overflow:hidden; margin-top:8px; }
     .tot[hidden], .lst[hidden], .empty[hidden] { display:none; }
     .tot { font-size:11px; opacity:.7; margin:0 0 4px; flex:none; }
@@ -975,6 +977,7 @@
     let customHeight = null;  // remembered manual resize height, like the tracker panels'
     let windowSel = "total";  // "total" | "now" — see map.js windowedDamage()
     let nextUpdateAt = 0;     // countdown target, from the engine's countrySummary messages
+    let nowClickedAt = 0;     // Date.now() of the last "Now" click — 0 when not in "now" mode
 
     const build = () => {
       host = document.createElement("div");
@@ -1004,6 +1007,7 @@
             <button data-win="total" class="active" type="button" title="Each battle's full damage total since it started">Ongoing battles</button>
             <button data-win="now" type="button" title="Damage dealt since this button was last clicked — click again to reset">Now</button>
           </div>
+          <div class="sincenow" hidden></div>
           <div class="out">
             <div class="tot" hidden></div>
             <div class="lst" hidden></div>
@@ -1023,7 +1027,7 @@
         cpop: cp.querySelector(".cpop"), csearch: cp.querySelector(".csearch"),
         clist: cp.querySelector(".clist"), out: cp.querySelector(".out"),
         tot: cp.querySelector(".tot"), lst: cp.querySelector(".lst"), emptyEl: cp.querySelector(".empty"),
-        winBtns: cp.querySelectorAll(".wins button"),
+        winBtns: cp.querySelectorAll(".wins button"), sinceNow: cp.querySelector(".sincenow"),
         uncollapseBtn: cp.querySelector(".uncollapse"), hrsz: cp.querySelector(".hrsz"),
       };
       els.cbtn.addEventListener("click", () => (comboOpen ? closeCombo() : openCombo()));
@@ -1158,11 +1162,25 @@
       els.emptyEl.textContent = msg;
     };
 
+    // Shows/hides the "Tracking since HH:MM:SS" label under the window buttons — only meaningful
+    // in "now" mode, and only once a click has actually happened (nowClickedAt is 0 otherwise).
+    const renderSinceNow = () => {
+      if (windowSel !== "now" || !nowClickedAt) { els.sinceNow.hidden = true; return; }
+      const d = new Date(nowClickedAt);
+      els.sinceNow.hidden = false;
+      els.sinceNow.textContent = `Tracking since ${d.toLocaleTimeString()}`;
+      els.sinceNow.title = d.toLocaleString();
+    };
+
     const choose = (cid) => {
       selected = cid || "";
       renderTrigger();
       closeCombo();
       nextUpdateAt = 0;
+      // The engine resets its own "now" baseline on every new selection too (see selectCountry in
+      // map.js) — a stale click time from a previous country wouldn't mean anything here anymore.
+      nowClickedAt = 0;
+      renderSinceNow();
       window.postMessage({ __wdl: CHANNEL, kind: "selectCountry", panelId, countryId: selected || null }, location.origin);
       setEmpty(selected ? "Loading…" : "Pick a country to see where it deals damage.");
     };
@@ -1170,7 +1188,11 @@
     const chooseWindow = (win) => {
       if (!CC_WINDOWS.some((w) => w.id === win)) return;
       windowSel = win;
+      // (Re)capture the exact click time every time "Now" is pressed — including clicking it again
+      // while already on "now", which resets both the damage baseline (engine) and this timestamp.
+      if (win === "now") nowClickedAt = Date.now();
       for (const b of els.winBtns) b.classList.toggle("active", b.getAttribute("data-win") === win);
+      renderSinceNow();
       window.postMessage({ __wdl: CHANNEL, kind: "selectCountryWindow", panelId, window: win }, location.origin);
     };
 
@@ -1180,7 +1202,9 @@
       if (!selected) return;
       selected = "";
       nextUpdateAt = 0;
+      nowClickedAt = 0;
       renderTrigger();
+      renderSinceNow();
       closeCombo();
       setEmpty("Pick a country to see where it deals damage.");
       window.postMessage({ __wdl: CHANNEL, kind: "selectCountry", panelId, countryId: null }, location.origin);
