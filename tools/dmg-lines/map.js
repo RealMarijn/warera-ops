@@ -23,8 +23,9 @@
 //   overlay  -> {kind:"setActivePanel", panelId}      (which panel's lines to draw)
 //   overlay  -> {kind:"requestBattleList"}            (populate the picker)
 // Data out:
-//   -> {kind:"summary", panelId, ..., header}   per-panel per-country totals
+//   -> {kind:"summary", panelId, ..., header, history}   per-panel per-country totals + timeline
 //   -> {kind:"battleList", battles}             active battles for the picker
+//   -> {kind:"battlePageOpened", battleId}      current /battle/<id>, or null off a battle page
 //
 // Pipeline: lasthit -> resolve user's country (cached) -> aggregate per country ->
 // project country + region centroid -> draw/update arcs, per watched battle. The
@@ -33,13 +34,14 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlEngine = "0.25.0"; } catch (_) {}
-  console.log("[WDL] map.js engine v0.25.0 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlEngine = "0.29.1"; } catch (_) {}
+  console.log("[WDL] map.js engine v0.29.1 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const NS = "http://www.w3.org/2000/svg";
   const RATE_WINDOW_MS = 60_000;   // sliding window for "damage/min"
   const MAX_LINES = 14;            // cap arcs to avoid clutter, per battle
+  const HISTORY_BUCKET_MS = 30_000; // bucket size for the panels' damage-over-time timeline chart
   const ATT = "#ff5a5a", DEF = "#5aa9ff";
   const WS_URL = "wss://ws.warera.io/connection/websocket"; // WarEra's Centrifugo endpoint
 
@@ -53,6 +55,11 @@
   let countryRankIndex = new Map();  // countryId -> its index in countryRankByRegionCount (0 = biggest)
   let ready = false;
   let enabled = true;
+  // Last-seen URL path, used to detect navigating to a battle page (clicking a battle pin on the
+  // map navigates the SPA there without a full reload — see the pathname watcher in start() below).
+  // Initialized at content-script injection time (not inside start()), so loading directly on a
+  // battle page doesn't itself look like "just navigated there".
+  let lastNavPath = location.pathname;
 
   // ---- core-country-colors map mode --------------------------------------
   // Colors every region by its ORIGINAL/core country (regions.initialCountryId)
@@ -591,7 +598,13 @@
   const ensureBattle = (battleId) => {
     let b = battles.get(battleId);
     if (!b) {
-      b = { region: null, meta: false, header: null, countries: new Map() };
+      // history: [{t, att, def}] cumulative attacker/defender totals at each HISTORY_BUCKET_MS
+      // bucket boundary, maintained incrementally in addDamage (not recomputed from raw events on
+      // every render tick — see there) — starts from nothing, since we only see hits from the
+      // moment a battle is FIRST picked in some panel (i.e. "since we chose to track it").
+      // startedAt is that same moment — kept even while history is still empty, so the timeline
+      // chart can show a flat "0 so far" line immediately instead of waiting for real hits.
+      b = { region: null, meta: false, header: null, countries: new Map(), history: [], historyTotals: { att: 0, def: 0 }, startedAt: Date.now() };
       battles.set(battleId, b);
     }
     if (!b.meta) {
@@ -618,6 +631,19 @@
     if (!c) { c = { side, total: 0, events: [] }; b.countries.set(countryId, c); }
     c.total += dmg;
     c.events.push({ t, dmg });
+
+    // Timeline chart data: an O(1) update per hit instead of rebuilding a bucketed history from
+    // every country's full events[] on every render tick, which would get steadily more expensive
+    // as a long-running battle accumulates more hits.
+    if (side === "attacker") b.historyTotals.att += dmg; else b.historyTotals.def += dmg;
+    const bucketT = Math.floor(t / HISTORY_BUCKET_MS) * HISTORY_BUCKET_MS;
+    const lastBucket = b.history[b.history.length - 1];
+    if (lastBucket && lastBucket.t === bucketT) {
+      lastBucket.att = b.historyTotals.att;
+      lastBucket.def = b.historyTotals.def;
+    } else {
+      b.history.push({ t: bucketT, att: b.historyTotals.att, def: b.historyTotals.def });
+    }
   };
 
   const resolveUser = (userId) => {
@@ -733,8 +759,16 @@
   //   prevDmg: Map<battleId,rawDmg>,            // RAW total — pulse-detection source + "now" baseline
   //   prevSplit: Map<battleId,{att,def}>,       // RAW attacker/defender split, latest known per battle
   //   pulseUntil: Map<battleId,ts>,
-  //   nextFullAt: number,                       // drives that window's own refresh countdown
+  //   nextFullAt: number,     // next full-scan (all active battles) — drives the countdown when
+  //                           // the country has no battle of its own currently active (see below)
+  //   nextFastAt: number,     // next fast-scan (this country's own attacker/defender battles) —
+  //                           // drives the countdown instead, whenever hasFastBattles() is true,
+  //                           // since that's the refresh that actually matters for this country
   //   fastTimer, fullTimer,
+  //   history: [{t, total}],   // RAW cumulative total (summed across every current target battle)
+  //                            // at each scan, for the timeline chart — always "since this country
+  //                            // was selected", independent of the Total/Now display window above
+  //   startedAt: number|null,  // when the current selection started; null while nothing's selected
   // }
   const ensureCountryPanel = (panelId) => {
     let p = countryPanels.get(panelId);
@@ -742,7 +776,7 @@
       p = {
         sel: null, window: "total", nowBaseline: null, nowSplitBaseline: null,
         targets: new Map(), prevDmg: new Map(), prevSplit: new Map(), pulseUntil: new Map(),
-        nextFullAt: 0, fastTimer: null, fullTimer: null,
+        nextFullAt: 0, nextFastAt: 0, fastTimer: null, fullTimer: null, history: [], startedAt: null,
       };
       countryPanels.set(panelId, p);
     }
@@ -1035,7 +1069,7 @@
       if (!live.has(cid)) { e.path.remove(); e.grad.remove(); e.halo.remove(); e.core.remove(); bd.arcEls.delete(cid); }
     }
 
-    return { active: true, header: b.header, totals, countries: shown, targetOccluded };
+    return { active: true, header: b.header, totals, countries: shown, targetOccluded, history: b.history, startedAt: b.startedAt };
   };
 
   // Keep the pin-mask holes on top of the game's battle pins. The pins are static in geo space, so
@@ -1216,6 +1250,17 @@
         p.pulseUntil.delete(id);
       }
     }
+
+    // Timeline chart data: the country's RAW total across every currently known target battle,
+    // bucketed the same way as the tracker panels' per-battle history — one point per scan is
+    // plenty of resolution given scans only happen every 10-30s anyway.
+    let totalRaw = 0;
+    for (const v of p.prevDmg.values()) totalRaw += v;
+    const bucketT = Math.floor(now / HISTORY_BUCKET_MS) * HISTORY_BUCKET_MS;
+    const lastBucket = p.history[p.history.length - 1];
+    if (lastBucket && lastBucket.t === bucketT) lastBucket.total = totalRaw;
+    else p.history.push({ t: bucketT, total: totalRaw });
+
     if (panelId === activeCountryPanelId) drawCountry();
     postCountrySummary(panelId);
     // The map may be idle (no render frames) — make sure the pulse class gets cleared after 5s.
@@ -1231,12 +1276,17 @@
     applyCountryScan(panelId, sel, results);
   };
 
+  // Battles where `sel` is a declared attacker/defender — the "fast" tier only ever needs to
+  // re-check these (its whole point is being cheap: usually just a handful of ids, not all ~80).
+  // Also used to decide which refresh timer the countdown UI should reflect — see postCountrySummary.
+  const fastBattleIds = (sel) =>
+    [...activeBattleIndex.entries()].filter(([, idx]) => idx.att === sel || idx.def === sel).map(([id]) => id);
+
   const countryFastScan = async (panelId) => {
     const p = countryPanels.get(panelId);
     if (!p || !p.sel) return;
     const sel = p.sel;
-    const ids = [...activeBattleIndex.entries()].filter(([, idx]) => idx.att === sel || idx.def === sel).map(([id]) => id);
-    const results = await scanCountryDamage(ids, sel);
+    const results = await scanCountryDamage(fastBattleIds(sel), sel);
     applyCountryScan(panelId, sel, results);
   };
 
@@ -1270,8 +1320,12 @@
     const p = countryPanels.get(panelId);
     if (!p || !p.sel) return; // window closed or deselected while the index built
     p.nextFullAt = Date.now() + COUNTRY_FULL_MS;
+    p.nextFastAt = Date.now() + COUNTRY_FAST_MS;
     countryFullScan(panelId);
-    p.fastTimer = setInterval(() => countryFastScan(panelId), COUNTRY_FAST_MS);
+    p.fastTimer = setInterval(() => {
+      p.nextFastAt = Date.now() + COUNTRY_FAST_MS;
+      countryFastScan(panelId);
+    }, COUNTRY_FAST_MS);
     p.fullTimer = setInterval(() => {
       p.nextFullAt = Date.now() + COUNTRY_FULL_MS;
       countryFullScan(panelId);
@@ -1299,7 +1353,12 @@
       countryId: sel,
       name: sel ? ((countryMeta[sel] && countryMeta[sel].name) || "?") : null,
       targets, total: targets.reduce((s, t) => s + t.damage, 0),
-      nextUpdateAt: sel ? p.nextFullAt : 0,
+      // The full-scan timer (30s) is what discovers NEW merc/ally involvement, but if this country
+      // already has a battle of its own active, the fast timer (10s) is what's actually refreshing
+      // its numbers — show whichever one is the truthful "next update", not always the slower one.
+      nextUpdateAt: sel ? (fastBattleIds(sel).length ? Math.min(p.nextFullAt, p.nextFastAt) : p.nextFullAt) : 0,
+      history: sel ? p.history : [],
+      startedAt: sel ? p.startedAt : null,
     }, location.origin);
   };
 
@@ -1330,6 +1389,9 @@
     p.nowBaseline = null;
     p.nowSplitBaseline = null;
     p.nextFullAt = 0;
+    p.nextFastAt = 0;
+    p.history = [];
+    p.startedAt = p.sel ? Date.now() : null;
     // Deliberately NOT resetting p.window — switching countries in the same window keeps whatever
     // time-window view was selected, same as any other display preference.
     if (panelId === activeCountryPanelId) drawCountry();
@@ -1472,6 +1534,8 @@
         name: (countryMeta[r.cid] || {}).name || "?",
         side: r.side, total: r.total, rate: r.rate,
       })),
+      history: snap.history || [],
+      startedAt: snap.startedAt || null,
     }, location.origin);
   };
 
@@ -1691,6 +1755,25 @@
     else if (d.kind === "coreColors") setCoreColorsEnabled(d.enabled);
   });
 
+  // Clicking a battle pin on the map navigates WarEra's SPA to /battle/<id> without a full page
+  // reload, so there's no "click" event this content script can directly observe — polled here
+  // (piggybacking the existing 1s tick) the same way battle-money-totals.js detects battle-page
+  // navigation elsewhere in this extension. Always posts (battleId is null off a battle page too),
+  // so the overlay's own "currently open battle page" cache stays correct after navigating away —
+  // not just while landing on one. The overlay decides what to do with it (see the
+  // "battlePageOpened" handling near the bottom of overlay.js): fills the FIRST tracker window that
+  // doesn't have a battle open yet, if any and if no OTHER window already has that same battle —
+  // leaves everything else untouched. `force` bypasses the "only when it changed" check, for the
+  // one-off call at startup: if the page is ALREADY on a battle when the engine finishes loading,
+  // that still needs to be reported once, even though lastNavPath was seeded with that same path.
+  const checkBattleNav = (force) => {
+    const path = location.pathname;
+    if (!force && path === lastNavPath) return;
+    lastNavPath = path;
+    const m = path.match(/^\/battle\/([a-fA-F0-9]{24})/);
+    window.postMessage({ __wdl: CHANNEL, kind: "battlePageOpened", battleId: m ? m[1] : null }, location.origin);
+  };
+
   const start = async () => {
     ensureSvg();
     try { ready = await buildLookups(); } catch (_) { ready = false; }
@@ -1699,9 +1782,11 @@
     setInterval(() => {
       draw(true);           // refresh rates + push summaries
       if (coreColorsEnabled) applyColorMode(); // self-heal if WarEra's app wiped our layer
+      checkBattleNav();
     }, 1000);
     draw(true);
     applyColorMode(); // picks up a toggle message that may have arrived before we were ready
+    checkBattleNav(true); // report "already on a battle page" once, if that's where we loaded
   };
 
   const waitForMap = () => {

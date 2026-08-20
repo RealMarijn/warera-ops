@@ -22,8 +22,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlPanel = "1.13.1"; } catch (_) {}
-  console.log("[WDL] overlay.js panel v1.13.1 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlPanel = "1.18.2"; } catch (_) {}
+  console.log("[WDL] overlay.js panel v1.18.2 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const FLAG = (code) => `https://media.warera.io/images/flags/${code}.svg?v=16`;
@@ -46,6 +46,73 @@
   };
   const esc = (s) => String(s == null ? "" : s).replace(/[<>&"]/g, (c) =>
     ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
+  // Elapsed time as m:ss, or h:mm for anything an hour+ — used on the timeline chart's X axis to
+  // show how long a battle has been tracked, not a wall-clock time.
+  const formatDuration = (ms) => {
+    const totalSec = Math.max(0, Math.round(ms / 1000));
+    const h = Math.floor(totalSec / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+    if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+    return `${m}:${String(s).padStart(2, "0")}`;
+  };
+
+  // Shared by both the LIVE tracker panels (attacker/defender, red+blue) and the "Country damage"
+  // windows (one series, yellow): builds a small rate-over-time chart from RAW cumulative history
+  // points. `series` is [{key, color}] — each history/sample object carries one raw cumulative
+  // value per series key, e.g. {t, att, def} or {t, total}. Returns null when there's nothing to
+  // show yet (no startedAt), otherwise {maxLabel, durationLabel, svg} for the caller to lay out.
+  //
+  // Two synthetic samples bookend the real history — {startedAt, ...allZero} and {now, <last known
+  // totals>} — so there's always at least one segment to draw: a flat 0 line before anything has
+  // happened, or a flat trailing segment for however long it's been quiet since the last update.
+  // Each plotted point is the delta between two consecutive samples divided by the ACTUAL time
+  // between them (not a fixed bucket size), since samples aren't evenly spaced — a quiet stretch is
+  // a wider gap, not a zero-filled entry, and dividing by a fixed interval would overstate the rate
+  // across it.
+  const buildTimelineChart = (history, startedAt, series) => {
+    if (!startedAt) return null;
+    const now = Date.now();
+    const last = history && history.length ? history[history.length - 1] : null;
+    const zero = { t: startedAt }, nowSample = { t: now };
+    for (const s of series) { zero[s.key] = 0; nowSample[s.key] = last ? last[s.key] : 0; }
+    const samples = [zero, ...(history || []), nowSample];
+
+    const rates = [];
+    for (let i = 1; i < samples.length; i++) {
+      const dtMs = samples[i].t - samples[i - 1].t;
+      if (dtMs <= 0) continue;
+      const r = { t: samples[i].t };
+      for (const s of series) r[s.key] = Math.max(0, ((samples[i][s.key] - samples[i - 1][s.key]) / dtMs) * 60000);
+      rates.push(r);
+    }
+    if (!rates.length) { const r = { t: now }; for (const s of series) r[s.key] = 0; rates.push(r); }
+
+    const W = 316, H = 46; // chart drawing area only — axis labels sit outside it
+    const t0 = startedAt, t1 = rates[rates.length - 1].t;
+    const dt = Math.max(1, t1 - t0);
+    const realMax = Math.max(0, ...rates.flatMap((p) => series.map((s) => p[s.key])));
+    const scaleMax = Math.max(1, realMax); // safe divisor — maxLabel below shows the real (possibly 0) max
+    const x = (t) => (((t - t0) / dt) * W).toFixed(1);
+    const y = (v) => (H - (v / scaleMax) * H).toFixed(1);
+    const area = (key) => {
+      let d = `M ${x(t0)} ${H}`;
+      for (const p of rates) d += ` L ${x(p.t)} ${y(p[key])}`;
+      return d + ` L ${x(rates[rates.length - 1].t)} ${H} Z`;
+    };
+    const line = (key) => `M ${x(t0)} ${y(0)} ` + rates.map((p) => `L ${x(p.t)} ${y(p[key])}`).join(" ");
+
+    // Areas drawn first (as a group), then lines on top (as a group) — so with 2 series the second
+    // one's line is never hidden under the first one's area fill.
+    const paths = series.map((s) => `<path d="${area(s.key)}" fill="${s.color}" fill-opacity="0.16" stroke="none"></path>`).join("")
+      + series.map((s) => `<path d="${line(s.key)}" fill="none" stroke="${s.color}" stroke-width="1.5"></path>`).join("");
+
+    return {
+      maxLabel: fmt(realMax) + "/min",
+      durationLabel: formatDuration(now - startedAt),
+      svg: `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" width="100%" height="${H}">${paths}</svg>`,
+    };
+  };
   const flagImg = (c) => (c && c.code) ? `<img class="fl" src="${FLAG(c.code)}" alt="">` : `<span class="fl"></span>`;
   // Blends two #rrggbb colors by t (0 = hex1, 1 = hex2) — used for the "Country damage" window's
   // amount text, which (unlike a tracker row) doesn't have a single fixed attacker/defender side.
@@ -63,6 +130,12 @@
                                      // independent of the tracker windows' wdlEnabled toggle above
   let battleItems = [];   // last battleList payload — shared, one fetch serves every panel's picker
   let listRequested = false;
+  // The battleId of whatever /battle/<id> page is currently open in this tab, or null — kept in
+  // sync by every "battlePageOpened" message from the engine (see checkBattleNav in map.js), which
+  // fires both on navigation AND once at startup if we're already on one. Used to auto-fill an
+  // empty tracker window immediately when it's created (spawnPanel), not just when navigation
+  // happens to occur while that window is already open.
+  let currentBattlePageId = null;
   const panels = new Map();   // panelId -> panel instance
   // "Country damage" windows (see near the bottom of this file) live in their own registry —
   // countryPanels — but participate in the SAME linked-group dragging/layout machinery as the
@@ -190,6 +263,15 @@
     .bhead .vs { opacity:.5; }
     .bhead .rate { font-size:11px; font-variant-numeric: tabular-nums; opacity:.85; }
     .bhead .reg { width:100%; text-align:center; opacity:.6; font-size:10px; margin-top:1px; }
+
+    .timeline { padding: 6px 10px 0; }
+    .timeline .tl-row { display:flex; align-items:stretch; gap:6px; }
+    .timeline .tl-y { display:flex; flex-direction:column; justify-content:space-between; flex:none;
+      width:34px; padding:1px 0; font-size:8.5px; opacity:.5; text-align:right; line-height:1.2;
+      font-variant-numeric:tabular-nums; }
+    .timeline svg { display:block; flex:1; min-width:0; }
+    .timeline .tl-x { display:flex; justify-content:space-between; margin:2px 0 0 40px;
+      font-size:8.5px; opacity:.4; font-variant-numeric:tabular-nums; }
 
     .uncollapse { all:unset; display:block; box-sizing:border-box; width:100%; text-align:center;
       margin-top:8px; padding:5px 10px; font:inherit; font-size:11px; opacity:.7; cursor:pointer;
@@ -334,6 +416,7 @@
           <button class="refresh" data-act="refresh" title="Refresh battle list">↻</button>
         </div>
         <div class="bhead" style="display:none"></div>
+        <div class="timeline" style="display:none"></div>
         <button class="uncollapse" data-act="toggle-body" style="display:none">▾ Show supporting countries</button>
         <div class="body" style="display:none"><div class="empty">Pick a battle above, or open one, to see live damage lines.</div></div>
         <div class="hrsz" title="Drag to resize" style="display:none"></div>`;
@@ -345,6 +428,7 @@
         body: panel.querySelector(".body"),
         hdr: panel.querySelector(".hdr"),
         bhead: panel.querySelector(".bhead"),
+        timeline: panel.querySelector(".timeline"),
         uncollapseBtn: panel.querySelector(".uncollapse"),
         hrsz: panel.querySelector(".hrsz"),
         combo: panel.querySelector(".combo"),
@@ -548,12 +632,29 @@
         (header.regionName ? `<span class="reg">${esc(header.regionName)}</span>` : "");
     };
 
+    // ---- damage-over-time chart --------------------------------------------------------
+    // history is [{t, att, def}], cumulative attacker/defender totals at each ~30s bucket since
+    // the battle was FIRST picked in any panel (see map.js's addDamage) — not the battle's own
+    // start, since we only see hits from the moment we start watching. startedAt is that same
+    // moment, kept even while history is still empty. See buildTimelineChart for how this turns
+    // into a plotted rate. Red vs blue matches the ATT/DEF coloring used everywhere else here.
+    const renderTimeline = (history, startedAt) => {
+      if (!els) return;
+      const built = buildTimelineChart(history, startedAt, [{ key: "def", color: DEF }, { key: "att", color: ATT }]);
+      if (!built) { els.timeline.style.display = "none"; els.timeline.innerHTML = ""; return; }
+      els.timeline.style.display = "";
+      els.timeline.innerHTML =
+        `<div class="tl-row"><div class="tl-y"><span>${esc(built.maxLabel)}</span><span>0</span></div>${built.svg}</div>` +
+        `<div class="tl-x"><span>0:00</span><span>${esc(built.durationLabel)}</span></div>`;
+    };
+
     const renderEmpty = (msg) => {
       els.body.innerHTML = `<div class="empty">${esc(msg || "Pick a battle above, or open one, to see live damage lines.")}</div>`;
     };
 
     const render = (summary) => {
       renderHeader(summary && summary.header, summary && summary.totals);
+      renderTimeline(summary && summary.header ? summary.history : null, summary && summary.header ? summary.startedAt : null);
       if (!summary || !summary.active || !summary.countries || !summary.countries.length) {
         renderEmpty(summary && summary.header ? "Waiting for hits in this battle…" : null);
         return;
@@ -620,6 +721,10 @@
     return {
       panelId,
       get panelEl() { return els.panel; },
+      // Used to find the first "empty" tracker window (and to check whether some OTHER window
+      // already has a given battle open) when a battle page is opened elsewhere — see the
+      // "battlePageOpened" handling below.
+      get selectedBattleId() { return battleListPicker.manualSelected || null; },
       onSummary: render,
       onBattleListUpdated,
       getRect, getPos, setPos, clamp, setActive, bringToFront, setLinkButton,
@@ -732,6 +837,21 @@
     });
   }
 
+  // ---- auto-fill from the currently open battle page -----------------------
+  const isBattleOpenInAnyPanel = (battleId) => {
+    for (const inst of panels.values()) if (inst.selectedBattleId === battleId) return true;
+    return false;
+  };
+  // Fills the FIRST empty tracker window with battleId — but only if no OTHER window already has
+  // that battle open, so navigating around (or spawning windows) never produces two windows
+  // watching the same battle just because it happened to be the open page at the time.
+  const autoFillEmptyPanel = (battleId) => {
+    if (!enabled || !battleId || isBattleOpenInAnyPanel(battleId)) return;
+    for (const inst of panels.values()) {
+      if (!inst.selectedBattleId) { inst.choose(battleId); return; }
+    }
+  };
+
   // ---- spawn / registry ---------------------------------------------------
   function spawnPanel() {
     const panelId = "p" + (++panelSeq) + "-" + Math.random().toString(36).slice(2, 6);
@@ -745,6 +865,10 @@
     inst.clamp();
     setActivePanel(panelId);
     updateCloseButtons();
+    // If a battle page is already open (and no other window is already watching it), show it in
+    // THIS freshly opened window right away — same idea as auto-filling on navigation, but scoped
+    // to the window that was just created instead of searching for "the first empty one".
+    if (currentBattlePageId && !isBattleOpenInAnyPanel(currentBattlePageId)) inst.choose(currentBattlePageId);
     return inst;
   }
 
@@ -821,6 +945,14 @@
     } else if (d.kind === "countrySummary") {
       const inst = countryPanels.get(d.panelId);
       if (inst) inst.onSummary(d);
+    } else if (d.kind === "battlePageOpened") {
+      // Navigated to a battle page (e.g. clicked a pin on the map, or the page loaded already on
+      // one), or navigated away from one (d.battleId is null then). Keep the cache in sync either
+      // way — spawnPanel reads it to fill a freshly opened window immediately — and fill the FIRST
+      // empty tracker window that doesn't already have it, if any (see autoFillEmptyPanel: never
+      // duplicates into a second window if one already has this battle open).
+      currentBattlePageId = d.battleId || null;
+      if (currentBattlePageId) autoFillEmptyPanel(currentBattlePageId);
     }
   });
 
@@ -898,7 +1030,7 @@
 
   const CC_CSS = `
     :host { all: initial; }
-    .cp { position: fixed; top: 24px; right: 24px; width: 232px; box-sizing: border-box; z-index: ${Z_BASE};
+    .cp { position: fixed; top: 24px; right: 24px; width: 260px; box-sizing: border-box; z-index: ${Z_BASE};
       display:flex; flex-direction:column; max-height: calc(100vh - 48px); min-height: 0;
       font-family: "Saira", system-ui, sans-serif; color: #e8e8ea;
       background: rgba(18,20,26,.92); border: 1px solid rgba(255,255,255,.12);
@@ -907,6 +1039,7 @@
     .h { display:flex; align-items:center; gap:6px; padding:8px 10px; cursor:move; font-weight:700; font-size:12px;
       border-bottom:1px solid rgba(255,255,255,.08); flex:none; }
     .h .dot { width:8px; height:8px; border-radius:50%; background:#ffcc44; box-shadow:0 0 8px #ffcc44; flex:none; }
+    .h .ttl { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .h .sp { flex:1; }
     .h .cd { font-size:9.5px; opacity:.55; font-variant-numeric:tabular-nums; white-space:nowrap; }
     .h button { all:unset; position:relative; cursor:pointer; opacity:.6; font-size:13px; padding:0 3px; }
@@ -948,10 +1081,18 @@
     .wins button.active { background:rgba(255,204,68,.16); border-color:rgba(255,204,68,.5); opacity:1; color:#ffcc44; }
     .sincenow[hidden] { display:none; }
     .sincenow { font-size:10px; opacity:.6; margin-top:5px; text-align:center; flex:none; }
+    .timeline { margin-top:8px; flex:none; }
+    .timeline .tl-row { display:flex; align-items:stretch; gap:6px; }
+    .timeline .tl-y { display:flex; flex-direction:column; justify-content:space-between; flex:none;
+      width:30px; padding:1px 0; font-size:8px; opacity:.5; text-align:right; line-height:1.2;
+      font-variant-numeric:tabular-nums; }
+    .timeline svg { display:block; flex:1; min-width:0; }
+    .timeline .tl-x { display:flex; justify-content:space-between; margin:2px 0 0 36px;
+      font-size:8px; opacity:.4; font-variant-numeric:tabular-nums; }
     .out { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; overflow:hidden; margin-top:8px; }
     .tot[hidden], .lst[hidden], .empty[hidden] { display:none; }
     .tot { font-size:11px; opacity:.7; margin:0 0 4px; flex:none; }
-    .lst { overflow-y:hidden; min-height:0; max-height:54px; transition:max-height .15s ease; }
+    .lst { overflow-y:hidden; min-height:0; max-height:0; transition:max-height .15s ease; }
     .lst.open { max-height:190px; overflow-y:auto; }
     .lst.grown { max-height:none; flex:1 1 auto; overflow-y:auto; }
     .r { display:flex; align-items:center; gap:8px; font-size:12px; margin:4px 0 1px; }
@@ -973,7 +1114,7 @@
     let host, root, els;
     let selected = "";
     let comboOpen = false, activeIdx = -1, flat = [];
-    let uncollapsed = false;   // collapsed by default: peek of ~2 rows, see CSS .lst/.lst.open
+    let uncollapsed = false;   // collapsed by default: the target list is fully hidden, see CSS .lst/.lst.open
     let customHeight = null;  // remembered manual resize height, like the tracker panels'
     let windowSel = "total";  // "total" | "now" — see map.js windowedDamage()
     let nextUpdateAt = 0;     // countdown target, from the engine's countrySummary messages
@@ -990,7 +1131,7 @@
       const cp = document.createElement("div");
       cp.className = "cp";
       cp.style.zIndex = String(Z_BASE); // raiseInZOrder assigns the real value right after this returns
-      cp.innerHTML = `<div class="h"><span class="dot"></span><span>Country damage</span><span class="sp"></span>
+      cp.innerHTML = `<div class="h"><span class="dot"></span><span class="ttl">Country damage</span><span class="sp"></span>
           <span class="cd" title="Time until the next refresh"></span>
           <button data-act="add" title="New country damage window">+</button>
           <button class="link" data-act="link" data-linked="1" title="Detach from group">⛓</button>
@@ -1008,6 +1149,7 @@
             <button data-win="now" type="button" title="Damage dealt since this button was last clicked — click again to reset">Now</button>
           </div>
           <div class="sincenow" hidden></div>
+          <div class="timeline" style="display:none"></div>
           <div class="out">
             <div class="tot" hidden></div>
             <div class="lst" hidden></div>
@@ -1028,6 +1170,7 @@
         clist: cp.querySelector(".clist"), out: cp.querySelector(".out"),
         tot: cp.querySelector(".tot"), lst: cp.querySelector(".lst"), emptyEl: cp.querySelector(".empty"),
         winBtns: cp.querySelectorAll(".wins button"), sinceNow: cp.querySelector(".sincenow"),
+        timeline: cp.querySelector(".timeline"),
         uncollapseBtn: cp.querySelector(".uncollapse"), hrsz: cp.querySelector(".hrsz"),
       };
       els.cbtn.addEventListener("click", () => (comboOpen ? closeCombo() : openCombo()));
@@ -1088,10 +1231,11 @@
       });
     }
 
-    // Collapsed (default): the list is capped to a ~2-row peek (CSS .lst, no scroll). Uncollapsed:
-    // capped to a ~7-row window with scrolling (CSS .lst.open); dragging .hrsz grows the WINDOW,
-    // and .lst.grown switches it to fill that extra space (flex) instead of staying capped,
-    // revealing more of the (always fully-rendered) list.
+    // Collapsed (default): the target list is fully hidden (CSS .lst, max-height:0) — just the
+    // combo/window-buttons/total/timeline stay visible. Uncollapsed: capped to a ~7-row window
+    // with scrolling (CSS .lst.open); dragging .hrsz grows the WINDOW, and .lst.grown switches it
+    // to fill that extra space (flex) instead of staying capped, revealing more of the (always
+    // fully-rendered) list.
     const setUncollapsed = (on) => {
       uncollapsed = on;
       if (on) {
@@ -1215,12 +1359,27 @@
       if (comboOpen) renderList();
     };
 
+    // history is [{t, total}], the country's RAW cumulative total (summed across every current
+    // target battle) at each scan since it was selected in THIS window — always "since selection",
+    // independent of the Total/Now display toggle above (see map.js's selectCountry). One yellow
+    // series instead of the tracker panels' red/blue pair, since there's no attacker/defender side
+    // to a country's own damage total.
+    const renderTimeline = (history, startedAt) => {
+      const built = buildTimelineChart(history, startedAt, [{ key: "total", color: "#ffcc44" }]);
+      if (!built) { els.timeline.style.display = "none"; els.timeline.innerHTML = ""; return; }
+      els.timeline.style.display = "";
+      els.timeline.innerHTML =
+        `<div class="tl-row"><div class="tl-y"><span>${esc(built.maxLabel)}</span><span>0</span></div>${built.svg}</div>` +
+        `<div class="tl-x"><span>0:00</span><span>${esc(built.durationLabel)}</span></div>`;
+    };
+
     // The list/total are STABLE elements (built once in build()) — only their content is updated
     // here, never the elements themselves, so els.lst stays a valid reference for the collapse/
     // resize CSS-class toggling in setUncollapsed/makeHeightResizable.
     const onSummary = (d) => {
       if (d.countryId !== selected) return; // ignore stale / other-selection updates
       nextUpdateAt = d.nextUpdateAt || 0;
+      renderTimeline(d.history, d.startedAt);
       if (!selected) { setEmpty("Pick a country to see where it deals damage."); return; }
       const targets = d.targets || [];
       if (!targets.length) {

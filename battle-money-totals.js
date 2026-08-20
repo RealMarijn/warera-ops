@@ -24,12 +24,24 @@
   // Anchored on the "By side"/"Overall" button text (real English strings) rather than a
   // hashed/generic class, so this can't accidentally match unrelated widgets elsewhere on the
   // page (e.g. the bottom-left "world battles" ticker, which shows the same coin icon).
+  //
+  // The leaderboard itself isn't a fixed number of levels above the button — WarEra now groups
+  // the By-side/Overall toggle together with a couple of icon-filter rows inside a shared toolbar
+  // block, so the wrapper immediately around the toggle no longer sits right next to the
+  // leaderboard. Climb up through however many ancestors have no next sibling of their own (i.e.
+  // are the last thing in whatever they're grouped with) until reaching the one that does — that's
+  // the leaderboard, right after the whole toolbar block ends.
   function findLeaderboardContainer() {
     const tabButton = Array.from(document.querySelectorAll("button")).find((b) => {
       const text = b.textContent.trim();
       return text === "By side" || text === "Overall";
     });
-    return tabButton?.parentElement?.nextElementSibling || null;
+    if (!tabButton) return null;
+    let node = tabButton.parentElement;
+    while (node && node.parentElement && !node.nextElementSibling) {
+      node = node.parentElement;
+    }
+    return node?.nextElementSibling || null;
   }
 
   function findColumns(leaderboardContainer) {
@@ -173,7 +185,7 @@
     const valueSpan = findMoneyValueSpan(tile);
     if (!valueSpan) return;
     if (isError) valueSpan.textContent = "Error";
-    else if (total == null) valueSpan.textContent = "…";
+    else if (total == null) valueSpan.textContent = "Loading…";
     else valueSpan.textContent = formatMoney(total);
   }
 
