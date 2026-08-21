@@ -1,25 +1,21 @@
-// Feature: on a battle page, shows a concise per-group damage-bonus breakdown next to the game's
-// own personal-bonus display for each side ("+63.75%"/"+20%" etc.) — own citizens, allies,
-// defensive-pact countries (when applicable), and everyone else — since that native number is
-// only ever YOUR own personal bonus, not what other groups in the same battle actually get.
-// Hovering a badge shows the complete breakdown, same table rijksoverheid_web's own "Live
-// battles" page already renders (Home/Enemy/Pact/Ally/Order/MU-ord/MU-HQ/Upgrade/Revolt/Max per
-// group) — this feature just fetches the one battle currently open from that same live snapshot.
+// Feature: on a battle page, adds one small pill-shaped "Bonuses" button next to the game's own
+// personal-bonus display for EACH side ("+63.75%"/"+20%" etc.) — that native number is only ever
+// YOUR OWN personal bonus, not what other groups in the same battle actually get. Nothing numeric
+// shows until you hover the pill (styled to actually look like a button — a bare dotted-underline
+// text label tried first wasn't a clear enough hover cue). Hovering shows that side's complete
+// breakdown — Own citizens / Allies / Pact countries / Other, same table rijksoverheid_web's own
+// "Live battles" page already renders (Home/Enemy/Pact/Ally/Order/MU-ord/MU-HQ/Upgrade/Revolt/Max
+// per group) — fetched from that same live snapshot for the one battle currently open.
 // Deliberately NOT whitelist-gated: see BACKEND_API.md's "public backend endpoints" section —
 // the exact same data is already public, unauthenticated, on the website itself.
 (function () {
+  // Same stack + weight already confirmed live for WarEra's own UI text elsewhere in this
+  // extension (see tools/dmg-lines/map.js's FLAG_FONT) — Saira is the game's actual webfont, not
+  // a system-font approximation, and 600 matches its own label weight.
+  const WARERA_FONT = "Saira, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', " +
+    "Roboto, 'Helvetica Neue', Arial, sans-serif";
   const MARKER_ATTR = "data-warera-ops-battle-bonus";
   const TOOLTIP_ID = "warera-ops-bonus-tooltip";
-  // Standard groups every battle side has some subset of — named per-country order rows (e.g. a
-  // specific ally that placed an order) are real data but too granular for the concise badge;
-  // they only show up in the hover breakdown table, same as on the website.
-  const CONCISE_GROUPS = ["Own citizens", "Allies", "Pact countries", "Other"];
-  const CONCISE_LABELS = {
-    "Own citizens": "Citizens",
-    "Allies": "Allies",
-    "Pact countries": "Pact",
-    "Other": "Other",
-  };
 
   let active = false;
   let observer = null;
@@ -74,12 +70,6 @@
     return (btnWrapper && btnWrapper.previousElementSibling) || null;
   }
 
-  function rowsForConcise(rows) {
-    return CONCISE_GROUPS
-      .map((g) => (rows || []).find((r) => r.group === g))
-      .filter(Boolean);
-  }
-
   // ---- hover tooltip (full breakdown table, same shape as the website's own) ------------------
   let tooltipEl = null;
   function ensureTooltip() {
@@ -91,7 +81,7 @@
       background: "rgba(20,23,30,0.92)", border: "1px solid rgba(255,255,255,0.14)",
       borderRadius: "10px", padding: "8px 10px", boxShadow: "0 10px 30px rgba(0,0,0,0.5)",
       backdropFilter: "blur(14px) saturate(150%)", WebkitBackdropFilter: "blur(14px) saturate(150%)",
-      font: "11px -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif",
+      font: `600 11px ${WARERA_FONT}`,
       color: "#eef0f4", display: "none",
       // A tall table flipped above a low-on-screen anchor could still push its own top past y=0
       // (nothing to flip TO at that point) — capping height and letting it scroll internally means
@@ -102,12 +92,23 @@
     return tooltipEl;
   }
 
+  // Rows the backend always sends for the standard groups — anything else is a specific country
+  // that placed a paid order (see BACKEND_API.md's gevechten/battle/.../bonus entry), inserted
+  // between "Allies"/"Pact countries" and the trailing "Other" row. A thin divider above the
+  // FIRST such country row visually separates "everyone in this group" from "these particular
+  // named countries" — only once, not again when the list returns to "Other" afterward.
+  const STANDARD_GROUPS = new Set(["Own citizens", "Allies", "Pact countries", "Other"]);
+
   function buildTooltipHTML(sideData) {
     const cols = ["Home", "Enemy", "Pact", "Ally.", "Order", "MU-ord*", "MU-HQ*", sideData.upgrade_label + "**", "Revolt", "~Max"];
     const keys = ["home", "enemy", "pact", "alliance", "order", "mu_order", "mu_hq", "upgrade", "revolt"];
+    let dividerAdded = false;
     const rows = (sideData.rows || []).map((r) => {
+      const isNamedCountry = !STANDARD_GROUPS.has(r.group);
+      const divider = isNamedCountry && !dividerAdded;
+      if (divider) dividerAdded = true;
       const cells = keys.map((k) => `<td>${esc(r[k])}</td>`).join("");
-      return `<tr><td class="wob-grp">${esc(r.group)}</td>${cells}<td class="wob-max">~${esc(r.max_est)}%</td></tr>`;
+      return `<tr${divider ? ' class="wob-divider"' : ""}><td class="wob-grp">${esc(r.group)}</td>${cells}<td class="wob-max">~${esc(r.max_est)}%</td></tr>`;
     }).join("");
     return `
       <div class="wob-ttl">${esc(sideData.country_name)} — full breakdown</div>
@@ -125,9 +126,10 @@
     #${TOOLTIP_ID} table.wob-table th, #${TOOLTIP_ID} table.wob-table td {
       padding: 2px 6px; text-align: right; font-variant-numeric: tabular-nums;
     }
-    #${TOOLTIP_ID} table.wob-table th { color: rgba(238,240,244,0.55); font-weight: 500; }
+    #${TOOLTIP_ID} table.wob-table th { color: rgba(238,240,244,0.55); font-weight: 600; }
     #${TOOLTIP_ID} table.wob-table td.wob-grp, #${TOOLTIP_ID} table.wob-table th:first-child { text-align: left; }
-    #${TOOLTIP_ID} table.wob-table td.wob-max { font-weight: 700; color: #e7b9a5; }
+    #${TOOLTIP_ID} table.wob-table td.wob-max { font-weight: 600; color: #e7b9a5; }
+    #${TOOLTIP_ID} table.wob-table tr.wob-divider td { border-top: 1px solid rgba(255,255,255,0.18); padding-top: 5px; }
     #${TOOLTIP_ID} .wob-note { margin-top: 6px; font-size: 9.5px; opacity: 0.5; white-space: normal; max-width: 340px; }
   `;
   let cssInjected = false;
@@ -139,10 +141,10 @@
     cssInjected = true;
   }
 
-  function showTooltip(anchorEl, sideData) {
+  function showTooltip(anchorEl, html) {
     ensureCSS();
     const tip = ensureTooltip();
-    tip.innerHTML = buildTooltipHTML(sideData);
+    tip.innerHTML = html;
     tip.style.display = "block";
     const r = anchorEl.getBoundingClientRect();
     const tipRect = tip.getBoundingClientRect();
@@ -163,70 +165,63 @@
     if (tooltipEl) tooltipEl.style.display = "none";
   }
 
-  // ---- concise badge ----------------------------------------------------------------------
-  // Row layout normally (matches "to the left/right of the native bonus"), but narrowing the
-  // battle window pushes that whole row wider than the viewport with nowhere to wrap — WarEra's
-  // own flex row around it doesn't wrap, and overriding that (DOM we don't own) risks breaking
-  // its own layout, so instead our own badge switches to a narrow, stacked column below that
-  // width, which shrinks its own footprint down to whatever the widest single chip needs.
-  const NARROW_BREAKPOINT_PX = 700;
-  // WarEra's own "damage bonus" glyph — the exact path its native personal-bonus display (the
-  // "+63.75%"/"+20%" numbers) and the round-bar damage-share numbers both already use, added here
-  // purely so our own numbers read as the same kind of thing rather than an unmarked plain label.
-  const DMG_ICON_SVG = '<svg class="wob-icon" viewBox="0 0 24 24" fill="currentColor">' +
-    '<path d="M6.23316 8.59556C6.30214 8.03946 6.39735 6.92211 7.65403 5.34032C9.25423 3.32614 ' +
-    '12.9443 1.00678 16.1654 1C8.5369 2.58693 13.5375 16.0826 18.3726 11.8508C19.221 11.0641 ' +
-    '17.269 8.59556 17.269 8.59556C18.5037 9.19236 19.9038 9.62639 20.5798 10.7657C21.3109 ' +
-    '12.5697 20.5867 15.0993 18.3726 18.3613C19.8004 17.7441 21.2143 17.1202 21.6834 ' +
-    '16.1911C22.042 19.0259 22.3041 21.7996 19.4762 22.7016C18.952 22.8169 18.3519 22.9118 ' +
-    '17.7036 23C18.2554 21.1215 15.4412 19.4328 16.7862 16.1911C15.8757 16.815 14.6618 ' +
-    '16.7133 14.4894 19.0734C13.7858 16.8829 12.8133 14.7466 9.93707 12.9359C10.2613 15.2552 ' +
-    '11.0545 18.3748 9.11628 19.4464C7.84716 20.1517 5.79862 18.3613 5.12958 17.6831C5.30891 ' +
-    '19.8397 6.36421 21.5758 8.14375 22.7626C5.63998 22.2133 3.59835 21.1893 2.9224 ' +
-    '19.4464C1.5912 17.188 1.81882 12.9359 4.02599 10.7657C6.23316 18.8089 7.75059 12.2713 ' +
-    '6.23316 8.59556Z"></path></svg>';
-  const BADGE_CSS = `
-    [${MARKER_ATTR}] { display: inline-flex; flex-direction: row; align-items: center; gap: 5px; margin: 0 6px;
-      font: 12px -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif;
-      cursor: default; vertical-align: middle; }
-    [${MARKER_ATTR}] .wob-icon { width: 1em; height: 1em; flex: none; color: #e7b9a5; }
-    [${MARKER_ATTR}] .wob-chip { display: inline-flex; align-items: center; gap: 3px;
-      padding: 2px 4px; border-radius: 999px;
-      color: rgba(238,240,244,0.85); white-space: nowrap; }
-    [${MARKER_ATTR}] .wob-chip b { font-weight: 700; color: #e7b9a5; }
-    @media (max-width: ${NARROW_BREAKPOINT_PX}px) {
-      [${MARKER_ATTR}] { flex-direction: column; align-items: flex-start; gap: 2px; margin: 4px 0; }
-    }
+  // ---- hover-button trigger (no numbers visible until you hover) -------------------------------
+  // A bare dotted-underline text label was tried first for "hover for info" but wasn't a clear
+  // enough cue — an actual pill/badge shape (background + rounded corners) reads as an
+  // interactive element on sight, the way a real button does, not just styled text.
+  //
+  // position:absolute, not a normal in-flow sibling: the native bonus display's column wrapper
+  // turned out (confirmed live) to be a flex row that WRAPS, not a stacking-context fight (its own
+  // z-index is "auto", not something competing) — inserting an extra in-flow item into that row
+  // sometimes tipped it over its available width, which is what actually pushed our pill onto a
+  // wrapped second line ("under" the native number), not a z-index/paint-order problem at all.
+  // Taking it out of flow entirely means it can never affect, or be affected by, that row's own
+  // wrap decisions — it's positioned manually instead (see positionTrigger), anchored to the same
+  // position:relative column div the native bonus display already lives in (confirmed live).
+  const TRIGGER_CSS = `
+    [${MARKER_ATTR}] { position: absolute; display: inline-flex; align-items: center; gap: 3px;
+      padding: 2px 8px; border-radius: 999px; background: rgba(255,255,255,0.1);
+      font: 600 11px ${WARERA_FONT}; color: rgba(238,240,244,0.8); cursor: help;
+      white-space: nowrap; z-index: 999999; }
+    [${MARKER_ATTR}]:hover { background: rgba(231,185,165,0.22); color: #e7b9a5; }
+    [${MARKER_ATTR}] .wob-info { opacity: 0.8; }
   `;
-  let badgeCssInjected = false;
-  function ensureBadgeCSS() {
-    if (badgeCssInjected) return;
+  let triggerCssInjected = false;
+  function ensureTriggerCSS() {
+    if (triggerCssInjected) return;
     const style = document.createElement("style");
-    style.textContent = BADGE_CSS;
+    style.textContent = TRIGGER_CSS;
     document.head.appendChild(style);
-    badgeCssInjected = true;
+    triggerCssInjected = true;
   }
 
-  function buildConciseBadge(sideData, side) {
-    ensureBadgeCSS();
-    const badge = document.createElement("span");
-    badge.setAttribute(MARKER_ATTR, side);
-    let rows = rowsForConcise(sideData.rows);
-    // Our badge sits BEFORE the native bonus on the defender side (to its left) but AFTER it on
-    // the attacker side (to its right) — reversing the defender's chip order puts "Citizens"
-    // last (i.e. nearest the native number, same as it already is on the attacker side, where
-    // it's first/nearest) so the most directly-comparable number sits next to the native one on
-    // both sides, not just one.
-    if (side === "defender") rows = rows.slice().reverse();
-    const chips = rows.map((r) =>
-      `<span class="wob-chip">${esc(CONCISE_LABELS[r.group])} <b>~${esc(r.max_est)}%</b></span>`
-    ).join("");
-    // Mirrors the native bonus display's own icon placement: attacker has icon-then-text, so ours
-    // leads with the icon too; defender has text-then-icon, so ours trails with it instead.
-    badge.innerHTML = side === "defender" ? chips + DMG_ICON_SVG : DMG_ICON_SVG + chips;
-    badge.addEventListener("mouseenter", () => showTooltip(badge, sideData));
-    badge.addEventListener("mouseleave", hideTooltip);
-    return badge;
+  // `marker` distinguishes the "defender"/"attacker" triggers so tryInject can check which one is
+  // already present without re-inserting a duplicate on every re-render. The ⓘ glyph plus the
+  // pill background above are both there for the same reason: make "hover this for info" obvious
+  // at a glance, not just implied by a subtle color/underline.
+  function buildTriggerText(label, marker, html) {
+    ensureTriggerCSS();
+    const el = document.createElement("span");
+    el.setAttribute(MARKER_ATTR, marker);
+    el.innerHTML = `<span class="wob-info">ⓘ</span>${esc(label)}`;
+    el.addEventListener("mouseenter", () => showTooltip(el, html));
+    el.addEventListener("mouseleave", hideTooltip);
+    return el;
+  }
+
+  // Manually places an (already position:absolute) trigger beside its native bonus anchor,
+  // relative to `container` — the position:relative column div both live in — rather than relying
+  // on normal flex flow, which is what wrapped it onto a second line in the first place.
+  function positionTrigger(el, anchorEl, container, side) {
+    const containerRect = container.getBoundingClientRect();
+    const anchorRect = anchorEl.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+    const top = anchorRect.top - containerRect.top + (anchorRect.height - elRect.height) / 2;
+    const left = side === "defender"
+      ? anchorRect.left - containerRect.left - elRect.width - 4
+      : anchorRect.right - containerRect.left + 4;
+    el.style.top = `${Math.round(top)}px`;
+    el.style.left = `${Math.round(left)}px`;
   }
 
   function tryInject() {
@@ -248,17 +243,18 @@
     }
     if (!data) return; // still loading, failed, or this battle isn't in the live snapshot
 
-    if (!document.querySelector(`[${MARKER_ATTR}="defender"]`)) {
-      const wrapper = findBonusWrapper("defender");
-      if (wrapper && wrapper.parentElement) {
-        wrapper.parentElement.insertBefore(buildConciseBadge(data.defender, "defender"), wrapper);
+    for (const side of ["defender", "attacker"]) {
+      const wrapper = findBonusWrapper(side);
+      const container = wrapper && wrapper.parentElement;
+      if (!container) continue;
+      let trigger = document.querySelector(`[${MARKER_ATTR}="${side}"]`);
+      if (!trigger) {
+        trigger = buildTriggerText("Bonuses", side, buildTooltipHTML(data[side]));
+        // Appended, not inserted at a specific flex position — position:absolute takes it out of
+        // that row's flow entirely, so where it sits in the DOM no longer matters for layout.
+        container.appendChild(trigger);
       }
-    }
-    if (!document.querySelector(`[${MARKER_ATTR}="attacker"]`)) {
-      const wrapper = findBonusWrapper("attacker");
-      if (wrapper && wrapper.parentElement) {
-        wrapper.parentElement.insertBefore(buildConciseBadge(data.attacker, "attacker"), wrapper.nextSibling);
-      }
+      positionTrigger(trigger, wrapper, container, side);
     }
   }
 
@@ -293,6 +289,11 @@
     observer = new MutationObserver(scheduleInject);
     observer.observe(document.body, { childList: true, subtree: true });
 
+    // The triggers are manually positioned (see positionTrigger) rather than left in normal flex
+    // flow — a window resize doesn't touch the DOM at all, so the MutationObserver above would
+    // never notice one, and the triggers would just go stale (positioned for the old layout).
+    window.addEventListener("resize", scheduleInject);
+
     lastPath = location.pathname;
     pollInterval = setInterval(() => {
       if (location.pathname !== lastPath) {
@@ -312,6 +313,7 @@
       browser.storage.onChanged.removeListener(storageListener);
       storageListener = null;
     }
+    window.removeEventListener("resize", scheduleInject);
     if (observer) {
       observer.disconnect();
       observer = null;
