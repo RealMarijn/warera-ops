@@ -4,6 +4,7 @@
 //   wdlEnabled            -> the damage-lines overlay (tools/dmg-lines)
 //   wdlCountryEnabled     -> the "Country damage" card (tools/dmg-lines), independent of wdlEnabled
 //   coreColorsEnabled     -> the core-country-colors map mode (tools/dmg-lines/map.js)
+//   showProxyEnabled      -> the proxy-country overlay (tools/dmg-lines), whitelist-gated
 const toggles = [
   { el: document.getElementById("toggle-stats"), key: "warera-ops-enabled", defaultOn: true },
   { el: document.getElementById("toggle-dmg"), key: "wdlEnabled", defaultOn: true },
@@ -14,6 +15,7 @@ const toggles = [
   { el: document.getElementById("toggle-bases"), key: "showBasesEnabled", defaultOn: false },
   { el: document.getElementById("toggle-bunkers"), key: "showBunkersEnabled", defaultOn: false },
   { el: document.getElementById("toggle-resistance"), key: "showResistanceEnabled", defaultOn: false },
+  { el: document.getElementById("toggle-proxy"), key: "showProxyEnabled", defaultOn: false },
   // Battle-view stat features (watched by their own feature scripts, e.g. battle-contracts.js).
   { el: document.getElementById("toggle-open-contracts"), key: "openContractsEnabled", defaultOn: true },
 ];
@@ -39,6 +41,7 @@ for (const t of toggles) {
 // the state is visible while the group is collapsed (its default).
 const mapFeatureKeys = [
   "srMapEnabled", "coreColorsEnabled", "showBasesEnabled", "showBunkersEnabled", "showResistanceEnabled",
+  "showProxyEnabled",
 ];
 const mapFeatureEls = mapFeatureKeys
   .map((key) => toggles.find((t) => t.key === key)?.el)
@@ -47,17 +50,18 @@ const mapBtn = document.getElementById("map-features-btn");
 const mapSubmenu = document.getElementById("map-submenu");
 const mapCountEl = document.getElementById("map-count");
 
-// Bases/bunkers/resistance pull from the whitelist-gated backend, so their
-// menu rows only exist for logged-in (approved) users. Hidden until auth
-// resolves, and not counted in the "N on" pill while hidden.
+// Bases/bunkers/resistance/proxy pull from the whitelist-gated backend, so
+// their menu rows only exist for logged-in (approved) users. Hidden until
+// auth resolves, and not counted in the "N on" pill while hidden.
 const authGatedEls = new Set(
-  ["showBasesEnabled", "showBunkersEnabled", "showResistanceEnabled"]
+  ["showBasesEnabled", "showBunkersEnabled", "showResistanceEnabled", "showProxyEnabled"]
     .map((k) => toggles.find((t) => t.key === k)?.el).filter(Boolean),
 );
 const authGatedRows = [
   document.getElementById("row-bases"),
   document.getElementById("row-bunkers"),
   document.getElementById("row-resistance"),
+  document.getElementById("row-proxy"),
 ].filter(Boolean);
 let authGated = true; // assume not-approved until WARERA_OPS_AUTH_STATUS says otherwise
 

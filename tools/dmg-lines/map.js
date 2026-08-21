@@ -26,6 +26,9 @@
 //   -> {kind:"summary", panelId, ..., header, history}   per-panel per-country totals + timeline
 //   -> {kind:"battleList", battles}             active battles for the picker
 //   -> {kind:"battlePageOpened", battleId}      current /battle/<id>, or null off a battle page
+// Proxy-country overlay (whitelisted, see overlay.js's backend polling):
+//   overlay  -> {kind:"proxyConfig", enabled}         user toggle, gates the layer below
+//   overlay  -> {kind:"proxyData", data}               { [countryId]: {o, r} }, proxies only — see BACKEND_API.md
 //
 // Pipeline: lasthit -> resolve user's country (cached) -> aggregate per country ->
 // project country + region centroid -> draw/update arcs, per watched battle. The
@@ -34,8 +37,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlEngine = "0.29.1"; } catch (_) {}
-  console.log("[WDL] map.js engine v0.29.1 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlEngine = "0.38.0"; } catch (_) {}
+  console.log("[WDL] map.js engine v0.38.0 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const NS = "http://www.w3.org/2000/svg";
@@ -86,6 +89,21 @@
   ];
   let coreColorsEnabled = false;
   let savedOwnershipVisibility = null;
+
+  // ---- proxy-country overlay ----------------------------------------------
+  // Whitelisted feature: a country whose current citizenry is dominated by
+  // immigrants from another ("origin") country is effectively that origin's
+  // puppet. When enabled, a small marker is added beside a proxy country's
+  // own (native) flag showing its origin's flag — using the same per-country
+  // flag machinery as core-country-colors above (FLAG_URL). An earlier
+  // version also recolored the proxy's regions to the origin's color, but
+  // that fill layer painted over region borders and WarEra's own flag icons
+  // (it sits above everything in the layer stack — see the flags this
+  // replaces) — dropped for now, flags-only.
+  // proxyData/enabled are pushed from overlay.js, which owns the whitelist
+  // check and backend polling (this MAIN-world script has no chrome.* access).
+  let proxyEnabled = false;
+  let proxyData = {}; // countryId -> { o: originCountryId, r: rate }, PROXY countries only (BACKEND_API.md's short field names, straight from the wire)
 
   // battleId -> { region, meta, header, countries: Map<countryId,{side,total,events:[{t,dmg}]}> }
   const battles = new Map();
@@ -293,6 +311,55 @@
     const blocks = clusterAllBlocks(positions);
     if (!blocks.length) return null;
     return nearestPosition(blocks[0].positions, blocks[0].pos);
+  };
+
+  // ---- WarEra's own native flag positions + label style --------------------
+  // Ground truth, not a computed approximation: WarEra's native country flags
+  // (the "country-label" symbol layer) are Point features on their OWN
+  // dedicated source, "countryLabels" — confirmed live via
+  // queryRenderedFeatures. Earlier attempts approximated this from
+  // region/country polygon geometry (a centroid), which never actually
+  // matched — the real points are seemingly derived from WarEra's own
+  // internal placement logic (tile-grid-shaped coordinates, not organic
+  // geometry), not reproducible from geometry at all. Reading them straight
+  // from this source sidesteps that entirely, and also directly explains
+  // "some countries get several flags" (confirmed by the user): a country
+  // with territory in multiple places simply has multiple Point features
+  // here, one per flag WarEra draws — returned as-is, one entry per flag,
+  // for the proxy marker to anchor under each.
+  // Each feature's properties also carry that SAME per-country label styling
+  // WarEra paints its own name text with — textColor/strokeColor (confirmed
+  // live, identical across every one of a country's multiple flag entries,
+  // it's a per-country style not a per-position one) — grabbed here from
+  // the first matching feature so the "proxy of ..." caption below can match
+  // it exactly instead of approximating a color from the fill palette.
+  // textSize and textLines (from countryName's own embedded "\n" — WarEra
+  // hard-wraps long names into the string itself rather than relying on
+  // layout-time wrapping, confirmed live e.g. "Central\nAfrica") are grabbed
+  // the same way, so the marker below can clear the native text block by
+  // exactly as much as IT actually needs, not a flat guess covering the
+  // worst case for every country regardless of its own name length.
+  const nativeFlagInfo = (cid) => {
+    const real = wdlMap();
+    const src = real && real.getSource("countryLabels");
+    const fc = src && (src._options ? src._options.data : src._data);
+    const feats = (fc && fc.features) || [];
+    const positions = [];
+    let textColor = null, strokeColor = null, textSize = null, textLines = null;
+    for (const f of feats) {
+      const p = f.properties;
+      if (!p || p.countryId !== cid) continue;
+      if (f.geometry && f.geometry.type === "Point" && Array.isArray(f.geometry.coordinates)) {
+        positions.push(f.geometry.coordinates);
+      }
+      if (textColor === null && p.textColor) textColor = p.textColor;
+      if (strokeColor === null && p.strokeColor) strokeColor = p.strokeColor;
+      if (textSize === null && p.textSize) textSize = p.textSize;
+      if (textLines === null && typeof p.countryName === "string") {
+        textLines = (p.countryName.match(/\n/g) || []).length + 1;
+      }
+    }
+    return { positions, textColor, strokeColor, textSize, textLines };
   };
 
   // ---- build position/metadata lookups ----------------------------------
@@ -547,6 +614,189 @@
     }
   };
 
+  // ---- proxy-country flag markers -----------------------------------------
+  // A single line — "proxy of [origin]" then a SMALL origin flag right after
+  // it — placed in clear space BELOW a proxy country's own NATIVE flag
+  // (WarEra's own country-label symbol layer, untouched — see
+  // OWNERSHIP_LAYER_IDS), not overlapping it at all. Earlier attempts tried
+  // sitting right on top of the native flag (same point, bigger, translucent
+  // or cut-out) but that never read well against text that varies in size
+  // and line count per country — sitting clearly below it sidesteps that
+  // entirely, at the cost of not being literally "layered" on the native icon.
+  // The clearance below the anchor is computed PER COUNTRY (see nativeFlagInfo's textSize/
+  // textLines), not a flat guess: confirmed live from the country-label layer's style spec,
+  // text-anchor is "top" with a [0,0] offset, so the text block starts exactly at the anchor and
+  // grows down at textSize * text-line-height (0.8) per line — the icon itself never factors in,
+  // it sits entirely ABOVE the anchor (icon-anchor "bottom"). A flat gap sized for the worst case
+  // (2 lines, largest textSize) left a big, obviously-too-far gap under every single-line name.
+  // Anchored via nativeFlagInfo(cid) — WarEra's own real flag coordinates
+  // (see that function's comment) — NOT countryPos[cid] (a computed
+  // core-territory centroid that never actually matched, see git history)
+  // and not a geometry-derived guess either: those both landed the marker
+  // over unrelated regions instead of under the real flag. A country whose
+  // current territory is split into several disconnected pieces gets a
+  // native flag for EACH piece (confirmed by the user, and directly visible
+  // in nativeFlagInfo's source data) — so this places one marker per piece
+  // too, not just at one.
+  // Rebuilt on every data refresh (proxy list changes rarely) — no zoom-based
+  // decluttering of its OWN beyond piggybacking the native flag's (see
+  // repositionProxyFlags): proxy countries are a handful at most (unlike all
+  // ~180 countries for the core-colors flags), no separate clutter to solve.
+  const NATIVE_TEXT_LINE_HEIGHT = 0.8; // confirmed live: country-label's own text-line-height
+  // Covers two things, not just a small margin: (1) genuine safety padding below the native
+  // text's last line (halo width, descenders), and (2) our OWN text element's y is its BASELINE
+  // (SVG's default), not its top — unlike the native label's y (text-anchor "top"), so without
+  // this our own glyphs start rendering well above the y coordinate itself, overlapping upward
+  // into the native text regardless of how accurately `clearance` alone was computed.
+  const NATIVE_TEXT_PAD = 12;
+  const DEFAULT_TEXT_SIZE = 14; // fallback if a country's own textSize wasn't found for some reason
+  const PROXY_LABEL_GAP = 4;
+  // Small — sits inline next to the caption text, not meant to stand on its own the way the
+  // earlier bigger attempts were.
+  const PROXY_FLAG_W = 16, PROXY_FLAG_H = 12;
+  const PROXY_FLAG_RX = 2; // corner radius — keep roughly in sync with the clipPath in ensureSvg
+
+  const rebuildProxyFlags = () => {
+    if (!gProxyFlags) return;
+    gProxyFlags.innerHTML = "";
+    for (const cid in proxyData) {
+      const origin = countryMeta[proxyData[cid].o];
+      if (!origin || !origin.code) continue;
+      const info = nativeFlagInfo(cid);
+      // NO fallback to countryPos here (deliberately — see git history for the earlier version
+      // that had one): a very small country never gets its own native flag rendered at all
+      // (confirmed by the user — there's simply no room for WarEra to place one), so it has zero
+      // entries in countryLabels. Falling back to an approximate core-centroid position for THAT
+      // case drew our marker floating disconnected over some unrelated country, since there's no
+      // real flag for it to sit under in the first place. No native flag anywhere -> no marker.
+      const anchors = info.positions;
+      // Match WarEra's own per-country label styling exactly (see nativeFlagInfo) rather than
+      // approximating a color from the fill palette — same font for every country (FLAG_FONT,
+      // already the established approximation elsewhere in this file), but the color/stroke are
+      // genuinely per-country data, straight from the same source WarEra itself reads.
+      const nameColor = info.textColor || "#fff";
+      const nameStroke = info.strokeColor || "#000";
+      const clearance = (info.textLines || 1) * (info.textSize || DEFAULT_TEXT_SIZE)
+        * NATIVE_TEXT_LINE_HEIGHT + NATIVE_TEXT_PAD;
+
+      for (const pos of anchors) {
+        const g = document.createElementNS(NS, "g");
+        g.setAttribute("data-cid", cid);
+        // Cached here rather than re-deriving in repositionProxyFlags (called on every map
+        // "render" tick during pan/zoom) — nativeFlagInfo scans every countryLabels feature, too
+        // costly to redo that often, and re-deriving could also drift from what was actually just
+        // built.
+        g.setAttribute("data-lng", String(pos[0]));
+        g.setAttribute("data-lat", String(pos[1]));
+
+        const labelY = clearance;
+        const label = document.createElementNS(NS, "text");
+        label.textContent = `proxy of ${origin.name || ""}`;
+        label.setAttribute("x", "0");
+        label.setAttribute("y", String(labelY));
+        label.setAttribute("text-anchor", "middle");
+        label.setAttribute("font-size", "11");
+        label.setAttribute("font-family", FLAG_FONT);
+        label.setAttribute("font-weight", "600");
+        label.setAttribute("fill", nameColor);
+        label.style.paintOrder = "stroke";
+        label.style.stroke = nameStroke;
+        label.style.strokeWidth = "2px";
+        label.style.strokeLinejoin = "round";
+        g.appendChild(label);
+        // Needs to be attached to measure the label's real rendered width (font metrics aren't
+        // known up front) before the flag can be placed right after it, with no overlap/gap guessing.
+        gProxyFlags.appendChild(g);
+        let labelRight = 40; // fallback, only hit if getBBox is unavailable (e.g. still display:none)
+        try {
+          const bb = label.getBBox();
+          if (bb && bb.width) labelRight = bb.x + bb.width;
+        } catch (_) { /* keep fallback */ }
+
+        const flagLeft = labelRight + PROXY_LABEL_GAP;
+        const flagTop = labelY - 4 - PROXY_FLAG_H / 2; // ~vertically centered on the text
+        const img = document.createElementNS(NS, "image");
+        img.setAttribute("href", FLAG_URL(origin.code));
+        img.setAttribute("width", String(PROXY_FLAG_W));
+        img.setAttribute("height", String(PROXY_FLAG_H));
+        img.setAttribute("x", String(flagLeft));
+        img.setAttribute("y", String(flagTop));
+        img.setAttribute("clip-path", "url(#wdl-proxy-flag-clip)"); // border-radius doesn't clip <image> content
+        g.appendChild(img);
+
+        // Border drawn as its own rect (not the image's CSS border, which SVG doesn't apply to
+        // rendered <image> content) — same geometry as the clip so its rounded corners line up.
+        const border = document.createElementNS(NS, "rect");
+        border.setAttribute("x", String(flagLeft));
+        border.setAttribute("y", String(flagTop));
+        border.setAttribute("width", String(PROXY_FLAG_W));
+        border.setAttribute("height", String(PROXY_FLAG_H));
+        border.setAttribute("rx", String(PROXY_FLAG_RX));
+        border.setAttribute("fill", "none");
+        border.setAttribute("stroke", "#000");
+        border.setAttribute("stroke-width", "1");
+        g.appendChild(border);
+      }
+    }
+  };
+
+  // The native country-label layer's own minzoom/maxzoom (confirmed live from its style spec:
+  // minzoom 2, maxzoom 4 — MapLibre treats maxzoom as exclusive, so visible for 2 <= zoom < 4).
+  // A hard cutoff, not an approximation like the rank ramp below — outside this range the native
+  // flag is DEFINITELY gone, so ours must vanish too rather than floating there unlabeled.
+  const NATIVE_LABEL_MINZOOM = 2, NATIVE_LABEL_MAXZOOM = 4;
+
+  const repositionProxyFlags = () => {
+    if (!gProxyFlags || gProxyFlags.style.display === "none") return;
+    const zoom = map.getZoom();
+    if (zoom < NATIVE_LABEL_MINZOOM || zoom >= NATIVE_LABEL_MAXZOOM) {
+      for (const g of gProxyFlags.children) g.style.display = "none";
+      return;
+    }
+    // Within that range, approximate WarEra's own collision-based decluttering (smaller countries'
+    // labels get dropped first as more of them compete for space on screen) with the same rank/ramp
+    // the core-colors flags already use (see repositionCoreFlags) — not exact (that's a live
+    // collision computation, not a fixed ranking), but the same approximation already accepted
+    // there.
+    const visibleCount = visibleFlagCount(countryRankByRegionCount);
+    for (const g of gProxyFlags.children) {
+      const rank = countryRankIndex.get(g.getAttribute("data-cid"));
+      if (rank !== undefined && rank >= visibleCount) { g.style.display = "none"; continue; }
+      const lng = parseFloat(g.getAttribute("data-lng"));
+      const lat = parseFloat(g.getAttribute("data-lat"));
+      if (!Number.isFinite(lng) || !Number.isFinite(lat)) { g.style.display = "none"; continue; }
+      const pos = [lng, lat];
+      if (isOccludedOnGlobe(pos)) { g.style.display = "none"; continue; }
+      g.style.display = "";
+      const p = map.project(pos);
+      g.setAttribute("transform", `translate(${p.x},${p.y})`);
+    }
+  };
+
+  // ---- shared dispatcher for proxy-country overlay -------------------------
+  // Flags-only now (see the block comment above) — no MapLibre layer to
+  // build/self-heal, just our own SVG markers, so this is much lighter than
+  // applyColorMode: show/rebuild/reposition, or hide.
+  const applyProxyMode = () => {
+    if (!map || !ready || !gProxyFlags) return;
+    if (proxyEnabled) {
+      gProxyFlags.style.display = "";
+      rebuildProxyFlags();
+      repositionProxyFlags();
+    } else {
+      gProxyFlags.style.display = "none";
+    }
+  };
+
+  const setProxyEnabled = (on) => {
+    proxyEnabled = !!on;
+    applyProxyMode();
+  };
+  const setProxyData = (data) => {
+    proxyData = data || {};
+    if (proxyEnabled) applyProxyMode();
+  };
+
   // ---- shared dispatcher for core-country-colors -------------------------
   // Idempotent and self-healing — safe to call any time (setCoreColorsEnabled
   // may fire before start() has finished, and it's also called every second
@@ -701,7 +951,7 @@
   // the switch to a newly-active panel instant (just a display:none/'' toggle,
   // never a recompute-from-scratch). All battles' node groups paint above ALL
   // battles' arc groups (two top-level containers), same layering as before.
-  let svg, gAllArcs, gAllNodes, defsEl, gCoreFlags;
+  let svg, gAllArcs, gAllNodes, defsEl, gCoreFlags, gProxyFlags;
   const battleDraw = new Map(); // battleId -> { gArcs, gNodes, arcEls: Map<countryId,{...}> }
 
   // The game's battle icons (the "battle-pin"/"region-battle-dot" map layers) are drawn ON the
@@ -815,6 +1065,22 @@
     pinHoles = document.createElementNS(NS, "g");
     pinMask.append(bg, pinHoles);
     defsEl.appendChild(pinMask);
+    // Rounded-corner clip for the proxy overlay's origin-flag image (see rebuildProxyFlags).
+    // objectBoundingBox units (a 0..1 box, not pixels) so this one static def works for every
+    // marker regardless of its actual position — border-radius doesn't clip an SVG <image>'s
+    // content in any browser, a clipPath is the only thing that actually does. rx/ry chosen to
+    // land on a few px of actual corner radius at PROXY_FLAG_W/H's size below (rx is a fraction
+    // of width, ry a fraction of height per the objectBoundingBox spec) — keep those two roughly
+    // in sync with PROXY_FLAG_W/H if that size ever changes.
+    const proxyClip = document.createElementNS(NS, "clipPath");
+    proxyClip.id = "wdl-proxy-flag-clip";
+    proxyClip.setAttribute("clipPathUnits", "objectBoundingBox");
+    const proxyClipRect = document.createElementNS(NS, "rect");
+    proxyClipRect.setAttribute("x", "0"); proxyClipRect.setAttribute("y", "0");
+    proxyClipRect.setAttribute("width", "1"); proxyClipRect.setAttribute("height", "1");
+    proxyClipRect.setAttribute("rx", "0.125"); proxyClipRect.setAttribute("ry", "0.167");
+    proxyClip.appendChild(proxyClipRect);
+    defsEl.appendChild(proxyClip);
     // Gentle breathing glow on live origin markers (see .wdl-live-halo toggle in updateBattleDraw()).
     const st = document.createElementNS(NS, "style");
     st.textContent =
@@ -836,6 +1102,9 @@
     gCoreFlags = document.createElementNS(NS, "g"); // core-country-colors flag markers, above everything else
     gCoreFlags.style.display = "none";
     svg.appendChild(gCoreFlags);
+    gProxyFlags = document.createElementNS(NS, "g"); // proxy-country flag markers, above everything else
+    gProxyFlags.style.display = "none";
+    svg.appendChild(gProxyFlags);
     // Inject INTO the map container so the lines share the map's stacking context and fall behind
     // the app UI. Fall back to a fixed full-viewport overlay only if the container is unavailable.
     // z-index 10 (not this codebase's old go-to of "near-max-int") — WarEra's own floating chat
@@ -1753,6 +2022,8 @@
     else if (d.kind === "selectCountry") selectCountry(d.panelId, d.countryId || null);
     else if (d.kind === "selectCountryWindow") selectCountryWindow(d.panelId, d.window);
     else if (d.kind === "coreColors") setCoreColorsEnabled(d.enabled);
+    else if (d.kind === "proxyConfig") setProxyEnabled(d.enabled);
+    else if (d.kind === "proxyData") setProxyData(d.data);
   });
 
   // Clicking a battle pin on the map navigates WarEra's SPA to /battle/<id> without a full page
@@ -1778,7 +2049,7 @@
     ensureSvg();
     try { ready = await buildLookups(); } catch (_) { ready = false; }
     if (!ready) { setTimeout(start, 1500); return; }
-    map.on("render", () => { draw(false); repositionCoreFlags(); });   // reproject only
+    map.on("render", () => { draw(false); repositionCoreFlags(); repositionProxyFlags(); });   // reproject only
     setInterval(() => {
       draw(true);           // refresh rates + push summaries
       if (coreColorsEnabled) applyColorMode(); // self-heal if WarEra's app wiped our layer
@@ -1786,6 +2057,7 @@
     }, 1000);
     draw(true);
     applyColorMode(); // picks up a toggle message that may have arrived before we were ready
+    applyProxyMode();
     checkBattleNav(true); // report "already on a battle page" once, if that's where we loaded
   };
 

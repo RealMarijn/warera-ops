@@ -1,12 +1,15 @@
-// Feature: adds a few specific rankings.*/top-level stats to the country page's rankings grid.
-// Structurally the same tile-clone approach as rankings.js (user page) — kept as a separate
-// file rather than a shared engine since the two pages differ in enough specifics (tooltip
-// support, allowed keys, endpoint/params) that a shared abstraction wasn't worth the risk of
-// touching the already-working user-page feature. If a third page type shows up, this is the
-// point to extract a common engine.
+// Feature: adds a few specific rankings.*/top-level stats to the country page's rankings grid,
+// plus a small "(proxy of X)" badge next to the country's own name when it's currently flagged
+// as a proxy/puppet country (see BACKEND_API.md's countries/proxy entry — same whitelist-gated
+// backend the tax tiles below already use). Structurally the same tile-clone approach as
+// rankings.js (user page) — kept as a separate file rather than a shared engine since the two
+// pages differ in enough specifics (tooltip support, allowed keys, endpoint/params) that a shared
+// abstraction wasn't worth the risk of touching the already-working user-page feature. If a third
+// page type shows up, this is the point to extract a common engine.
 (function () {
   const RANK_HREF_PREFIX = "/rankings/countries?rank=";
   const MARKER_ATTR = "data-warera-ops-country-tile";
+  const PROXY_BADGE_ATTR = "data-warera-ops-proxy-badge";
   const PREFERRED_TEMPLATE_HREF = `${RANK_HREF_PREFIX}countryDamages`;
   const BADGE_BASE_CLASSES = ["chnava4", "chnavau"]; // shared by every tile's rank badge, unlike the tier-color class
 
@@ -115,6 +118,9 @@
     // undefined = not fetched yet, null = fetched but no data for this country (or logged out/failed),
     // { startedAt, entry: { d, w, m } } once loaded.
     tax: undefined,
+    // undefined = not fetched yet, null = fetched but this country isn't currently a proxy (or
+    // logged out/failed), { originId, originName } once loaded — see fetchProxy.
+    proxy: undefined,
   };
 
   let active = false;
@@ -280,6 +286,31 @@
     }
   }
 
+  // Proxy/puppet-country detection — same whitelist-gated backend as fetchTax above (see
+  // BACKEND_API.md's countries/proxy entry). The endpoint only returns the origin's country id,
+  // not a display name, so a country actually flagged as a proxy needs one extra (public, not
+  // gated) country.getCountryById call to resolve that id to a name for the badge.
+  async function fetchProxy(countryId) {
+    try {
+      const data = await browser.runtime.sendMessage({
+        type: "WARERA_OPS_AUTHED_FETCH",
+        path: "/api/ext/countries/proxy",
+        method: "GET",
+      });
+      const entry = data?.[countryId];
+      if (!entry?.o) { state.proxy = null; return; }
+      const originResult = await browser.runtime.sendMessage({
+        type: "WARERA_OPS_FETCH",
+        endpoint: "country.getCountryById",
+        params: { countryId: entry.o },
+      });
+      const originPayload = originResult?.result?.data ?? originResult;
+      state.proxy = { originId: entry.o, originName: originPayload?.name || null };
+    } catch (err) {
+      state.proxy = null; // not logged in / not whitelisted / network failure — badge just doesn't show
+    }
+  }
+
   async function ensureRankingsFetched(countryId) {
     if (state.countryId === countryId && state.rankings !== undefined) return;
     if (state.fetching) return;
@@ -288,11 +319,13 @@
     state.rankings = undefined;
     state.payload = null;
     state.tax = undefined;
+    state.proxy = undefined;
 
     // WarEra's client-side router swaps the grid's real tiles but leaves our injected ones
     // alone (React doesn't know about them) — clear them now so stale numbers from the
     // previous country don't linger while the new country's data loads.
     document.querySelectorAll(`[${MARKER_ATTR}]`).forEach((el) => el.remove());
+    document.querySelectorAll(`[${PROXY_BADGE_ATTR}]`).forEach((el) => el.remove());
 
     try {
       const [rankingsResult] = await Promise.allSettled([
@@ -302,6 +335,7 @@
           params: { countryId },
         }),
         fetchTax(countryId), // sets state.tax itself; failure here shouldn't fail the rankings fetch
+        fetchProxy(countryId), // sets state.proxy itself; same reasoning
       ]);
       if (rankingsResult.status === "fulfilled") {
         const payload = rankingsResult.value?.result?.data ?? rankingsResult.value;
@@ -320,6 +354,48 @@
     }
   }
 
+  // Anchored on the "Country" label text (a real English string) rather than a hashed/generic
+  // class, same idiom battle-money-totals.js's findLeaderboardContainer() already established for
+  // this exact kind of fragility. The label's own row isn't guaranteed to sit a fixed number of
+  // levels above its sibling (WarEra can insert wrapper divs), so climb up through however many
+  // ancestors have no next sibling of their own until reaching the one that does — that's the row
+  // holding the actual name.
+  function findCountryNameSpan() {
+    const label = Array.from(document.querySelectorAll("span")).find(
+      (s) => s.children.length === 0 && s.textContent.trim() === "Country"
+    );
+    if (!label) return null;
+    let row = label.parentElement;
+    while (row && row.parentElement && !row.nextElementSibling) row = row.parentElement;
+    const nameRow = row && row.nextElementSibling;
+    return nameRow ? nameRow.querySelector("span") : null;
+  }
+
+  function injectProxyBadge() {
+    document.querySelectorAll(`[${PROXY_BADGE_ATTR}]`).forEach((el) => el.remove());
+    if (!state.proxy) return; // not a proxy, not logged in, still loading, or failed
+
+    const nameSpan = findCountryNameSpan();
+    if (!nameSpan || !nameSpan.parentElement) return;
+
+    const originName = state.proxy.originName || "?";
+    const badge = document.createElement("a");
+    badge.setAttribute(PROXY_BADGE_ATTR, "1");
+    badge.href = `/country/${state.proxy.originId}`;
+    badge.textContent = `(proxy of ${originName})`;
+    badge.title = `${nameSpan.textContent.trim()} is currently a proxy of ${originName} — most of ` +
+      "its recent citizens immigrated from there.";
+    // Match the country name's actual rendered size exactly (read live) rather than an em
+    // guess relative to some ancestor — the name's own class may set a font-size that doesn't
+    // match what this element would otherwise inherit.
+    const nameFontSize = getComputedStyle(nameSpan).fontSize;
+    Object.assign(badge.style, {
+      marginLeft: "10px", fontSize: nameFontSize, fontWeight: "500", opacity: "1.0",
+      textDecoration: "none", verticalAlign: "middle", whiteSpace: "nowrap",
+    });
+    nameSpan.parentElement.appendChild(badge);
+  }
+
   function tryInject() {
     if (!active || !window.WarEraOps.isEnabled()) return;
 
@@ -330,6 +406,7 @@
       ensureRankingsFetched(countryId);
       return;
     }
+    injectProxyBadge(); // independent of the rankings grid below — show/hide regardless of its state
     if (!state.rankings) return; // still loading, or fetch failed/empty
 
     const originalTiles = Array.from(
@@ -415,6 +492,7 @@
       pollInterval = null;
     }
     document.querySelectorAll(`[${MARKER_ATTR}]`).forEach((el) => el.remove());
+    document.querySelectorAll(`[${PROXY_BADGE_ATTR}]`).forEach((el) => el.remove());
     state.countryId = null;
     state.rankings = undefined;
     state.payload = null;

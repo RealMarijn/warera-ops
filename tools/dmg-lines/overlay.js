@@ -19,11 +19,17 @@
 // map, since drawing every open panel's lines at once would be unreadable. See
 // map.js for how it keeps every watched battle's arcs continuously up to date
 // (not just the active one) so switching which panel is active is instant.
+//
+// Also owns the "proxy-country overlay" toggle (whitelisted): unlike every other
+// toggle here, that one needs backend access (WARERA_OPS_AUTH_STATUS/AUTHED_FETCH,
+// see BACKEND_API.md) since map.js runs in the MAIN world with no chrome.* API —
+// this file checks eligibility, polls the backend, and relays both the on/off
+// state and the fetched data to map.js, which owns the actual map layer/flags.
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlPanel = "1.18.2"; } catch (_) {}
-  console.log("[WDL] overlay.js panel v1.18.2 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlPanel = "1.19.0"; } catch (_) {}
+  console.log("[WDL] overlay.js panel v1.19.0 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const FLAG = (code) => `https://media.warera.io/images/flags/${code}.svg?v=16`;
@@ -1002,11 +1008,81 @@
     window.postMessage({ __wdl: CHANNEL, kind: "coreColors", enabled: on }, location.origin);
   };
 
+  // ---- toggle (proxy-country overlay, whitelisted) --------------------------
+  // Independent of every toggle above — purely a config+data relay to map.js,
+  // which owns the actual map layer/flags. This side's whole job is the two
+  // things map.js can't do itself (no chrome.* access in the MAIN world):
+  // check whitelist eligibility and poll the whitelist-gated backend. Mirrors
+  // base-overlay.js's auth/poll pattern exactly (see BACKEND_API.md).
+  const PROXY_STORAGE_KEY = "showProxyEnabled";
+  const PROXY_POLL_MS = 2 * 60 * 1000; // matches base-overlay.js's cadence for similar backend data
+  let proxyFeatureEnabled = false; // user's toggle intent (popup/menu) — off by default, opt-in
+  let proxyLoggedIn = false;
+  let proxyPollTimer = null;
+  let proxyPolling = false;
+
+  const proxyEff = () => proxyFeatureEnabled && proxyLoggedIn;
+  const relayProxyConfig = () => {
+    window.postMessage({ __wdl: CHANNEL, kind: "proxyConfig", enabled: proxyEff() }, location.origin);
+  };
+  const isProxyLoggedOutErr = (err) =>
+    err && (err.code === "not_logged_in" || /not_logged_in/.test(String(err.message || err)));
+
+  const pollProxyData = async () => {
+    if (proxyPolling || !proxyEff()) return;
+    proxyPolling = true;
+    try {
+      const data = await browser.runtime.sendMessage({
+        type: "WARERA_OPS_AUTHED_FETCH", path: "/api/ext/countries/proxy", method: "GET",
+      });
+      window.postMessage({ __wdl: CHANNEL, kind: "proxyData", data: data || {} }, location.origin);
+    } catch (err) {
+      if (isProxyLoggedOutErr(err)) { setProxyLoggedIn(false); return; }
+      console.warn("[WDL] proxy backend fetch failed:", err); // network/non-2xx -> skip this cycle
+    } finally {
+      proxyPolling = false;
+    }
+  };
+
+  const scheduleProxyPolling = () => {
+    if (proxyEff()) {
+      if (!proxyPollTimer) proxyPollTimer = setInterval(pollProxyData, PROXY_POLL_MS);
+      pollProxyData(); // fetch immediately so enabling the toggle doesn't wait up to 2 min
+    } else if (proxyPollTimer) {
+      clearInterval(proxyPollTimer);
+      proxyPollTimer = null;
+    }
+  };
+
+  function setProxyLoggedIn(v) {
+    if (proxyLoggedIn === v) return;
+    proxyLoggedIn = v;
+    relayProxyConfig();
+    scheduleProxyPolling();
+  }
+
+  async function refreshProxyAuth() {
+    try {
+      const status = await browser.runtime.sendMessage({ type: "WARERA_OPS_AUTH_STATUS" });
+      setProxyLoggedIn(!!status?.loggedIn);
+    } catch (_) { setProxyLoggedIn(false); }
+  }
+
+  const setProxyFeatureEnabled = (on) => {
+    proxyFeatureEnabled = on;
+    relayProxyConfig();
+    scheduleProxyPolling();
+  };
+
   try {
     chrome.storage?.onChanged.addListener((ch) => {
       if (ch.wdlEnabled) setEnabled(ch.wdlEnabled.newValue !== false);
       if (ch.coreColorsEnabled) relayCoreColors(ch.coreColorsEnabled.newValue === true);
       if (ch.wdlCountryEnabled) setCountryFeatureEnabled(ch.wdlCountryEnabled.newValue !== false);
+      if (ch[PROXY_STORAGE_KEY]) setProxyFeatureEnabled(ch[PROXY_STORAGE_KEY].newValue === true);
+      // Login/logout lands as token changes in storage (background.js owns these); runtime
+      // broadcasts don't reach content scripts, so this is how the proxy feature notices too.
+      if ("wopsRefreshToken" in ch || "wopsAccessToken" in ch) refreshProxyAuth();
     });
   } catch (_) {}
 
@@ -1524,7 +1600,7 @@
       // (top:24px;left:24px, set above) is already correct and needs no JS repositioning,
       // so there's no flash-then-jump on a fresh install / first-ever load.
       chrome.storage?.local.get(
-        ["wdlPos", "wdlSize", "wdlEnabled", "coreColorsEnabled", "wdlCountryEnabled"],
+        ["wdlPos", "wdlSize", "wdlEnabled", "coreColorsEnabled", "wdlCountryEnabled", PROXY_STORAGE_KEY],
         (v) => {
           if (v.wdlPos) {
             const left = parseFloat(v.wdlPos.left), top = parseFloat(v.wdlPos.top);
@@ -1542,6 +1618,10 @@
           setEnabled(v.wdlEnabled !== false);
           setCountryFeatureEnabled(v.wdlCountryEnabled !== false);
           relayCoreColors(v.coreColorsEnabled === true);
+          // Whitelist-gated — actual on/off also depends on refreshProxyAuth's login check
+          // (see proxyEff), which relays config + starts polling once that resolves.
+          proxyFeatureEnabled = v[PROXY_STORAGE_KEY] === true;
+          refreshProxyAuth();
         }
       );
     } catch (_) {
@@ -1549,6 +1629,7 @@
       relayConfig();
       relayCountryConfig();
       relayCoreColors(false);
+      refreshProxyAuth();
     }
     // The engine (map.js) needs a moment to build its country/region lookups before
     // battle.getGroupedActiveBattles is worth calling, and this whole thing runs at

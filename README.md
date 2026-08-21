@@ -2,7 +2,7 @@
 
 # WarEra Ops
 
-A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats, a live battle damage tracker, and map overlays (bases, bunkers, resistance, core country colors) to the [WarEra](https://app.warera.io) browser game — mostly pulled from WarEra's own public API, with a few whitelist-gated features backed by a companion server — styled to match the game's own UI.
+A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats, a live battle damage tracker, and map overlays (bases, bunkers, resistance, core country colors, proxy countries) to the [WarEra](https://app.warera.io) browser game — mostly pulled from WarEra's own public API, with a few whitelist-gated features backed by a companion server — styled to match the game's own UI.
 
 ## Table of contents
 
@@ -34,7 +34,7 @@ A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats, a l
 
 ### Country & MU
 
-- **Country pages** — adds Region Diff, Country Bounty, and Current Population ranking tiles, plus Daily/Weekly/Monthly Tax Revenue tiles (whitelist-gated — sign in with Discord in the popup to see these).
+- **Country pages** — adds Region Diff, Country Bounty, and Current Population ranking tiles, plus Daily/Weekly/Monthly Tax Revenue tiles (whitelist-gated — sign in with Discord in the popup to see these). If the country is currently a proxy/puppet of another (see [Proxy countries](#map) below), a small "(proxy of X)" badge appears next to its name, linking to that origin country (also whitelist-gated).
 - **MU pages** — adds Bounty and Invested Money ranking tiles.
 - **Country/MU account pages** — shows total inventory value (money plus all items at current market price).
 
@@ -46,14 +46,17 @@ A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats, a l
   - Open several tracker windows at once (**+** button) to watch multiple battles side by side. They're linked by default — drag one and they all move together; detach one (⛓ button) to reposition it independently, and reattach it later. Whichever window you clicked last is the "active" one; only its lines are drawn on the map, so the map doesn't get cluttered with every open battle at once.
   - Collapsed by default to just the two fighting countries and the region; click "Show supporting countries" to expand the full per-country damage breakdown, which scrolls and can be resized taller.
   - Close windows with the ✕ button; closing the last one turns the "Damage lines" toggle off in the popup, so re-enabling it there spawns a fresh window.
+  - A small timeline chart shows damage rate (K/min) over time since the window started tracking, for both sides.
+- **Country damage** — a companion floating window (independent on/off toggle from the tracker above) that picks one country and draws a line to every currently active battle it's dealing damage in — including battles it's not a direct belligerent of, via allies or mercenaries. Shows Total (all-time) or Now (since you last clicked "Now", with a timestamp of when that was) damage per battle, colour-split red/blue by that battle's attacker/defender ratio, plus its own timeline chart of total damage rate. Like the tracker above, you can open several windows to watch multiple countries at once.
 
 ### Map
 
 - **Core country colors** (off by default) — recolors every region by its *original* owning country instead of whoever currently controls it, using the same colors WarEra's own map already uses per country. Useful for seeing at a glance how much of a country's original territory has actually been conquered.
+- **Proxy countries** (whitelist-gated) — flags a country as a proxy/puppet when most of its recent citizens immigrated from one other ("origin") country. Adds a small flag + "proxy of X" label under that country's own native flag on the map, in the origin's real label colour and font. Countries too small to ever get their own flag on the map (no room for WarEra to draw one) are skipped rather than shown floating disconnected from anything.
 
 ### Extension controls
 
-- **Popup menu** (toolbar icon) — toggle Extra stats, the Damage tracker, and Core country colors on or off independently, and, if you're on the whitelist, sign in with Discord for features that need it.
+- **Popup menu** (toolbar icon) — toggle Extra stats, the Damage tracker, Country damage, Core country colors, and (if you're on the whitelist) Proxy countries on or off independently, and sign in with Discord for features that need it.
 
 ## Signing in with Discord
 
@@ -61,14 +64,15 @@ A few features need data that isn't in WarEra's own public API, so they're serve
 
 - Military base, bunker, and resistance icons on the map
 - Daily/Weekly/Monthly Tax Revenue tiles on country pages
+- Proxy countries on the map, and the matching "(proxy of X)" badge on country pages
 
-Everything else in this extension (profile/country/MU/battle stats, the damage tracker, core country colors) works without signing in.
+Everything else in this extension (profile/country/MU/battle stats, the damage tracker, country damage, core country colors) works without signing in.
 
 To sign in:
 
 1. Open the popup (click the WarEra Ops icon in your toolbar) and scroll to the bottom.
 2. Click **Login with Discord**. A new tab opens to complete the Discord login.
-3. If your Discord account is on the whitelist, the popup shows "Logged in as &lt;your name&gt;" and the gated rows (Military bases / Bunkers / Resistance under Map features, and the tax tiles on country pages) become available.
+3. If your Discord account is on the whitelist, the popup shows "Logged in as &lt;your name&gt;" and the gated rows (Military bases / Bunkers / Resistance / Proxy countries under Map features, and the tax tiles + proxy badge on country pages) become available.
 4. If it isn't, you'll see "That Discord account isn't on the WarEra Ops whitelist." — reach out to **RealMarijn** in-game or on Discord to request access.
 
 Click **Logout** in the popup at any time to sign out again; that immediately revokes the session on the server. See the [Privacy Policy](https://warera.realmarijn.nl/privacy) for exactly what's stored on each side.
