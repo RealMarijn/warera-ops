@@ -46,7 +46,7 @@
   "content_scripts": [
     {
       "matches": ["https://app.warera.io/*"],
-      "js": ["browser-polyfill.js", "common.js", "rankings.js", "country-rankings.js", "mu-rankings.js", "inventory-export.js", "battle-money-totals.js", "account-inventory-value.js", "battle-contracts.js"],
+      "js": ["browser-polyfill.js", "common.js", "rankings.js", "country-rankings.js", "mu-rankings.js", "inventory-export.js", "battle-money-totals.js", "account-inventory-value.js", "battle-contracts.js", "battle-bonus.js"],
       "run_at": "document_idle"
     },
     {

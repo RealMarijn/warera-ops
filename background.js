@@ -36,6 +36,9 @@ browser.runtime.onMessage.addListener((message) => {
   if (message?.type === "WARERA_OPS_AUTHED_FETCH") {
     return authedFetch(message.path, { method: message.method, body: message.body });
   }
+  if (message?.type === "WARERA_OPS_BACKEND_FETCH") {
+    return backendFetch(message.path);
+  }
   if (message?.type === "WARERA_OPS_AUTH_STATUS") {
     return getAuthStatus();
   }
@@ -156,6 +159,16 @@ async function authedFetch(path, { method = "GET", body } = {}) {
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+  if (!res.ok) throw new Error(`HTTP ${res.status} from ${path}`);
+  return res.json();
+}
+
+// Public-backend passthrough — same BACKEND host as authedFetch above, but no bearer token: for
+// endpoints that are deliberately NOT whitelist-gated (e.g. /api/gevechten/*, already served
+// unauthenticated to anyone visiting the website itself). Keep using WARERA_OPS_AUTHED_FETCH for
+// anything under /api/ext/* — that prefix means whitelist-gated throughout this codebase.
+async function backendFetch(path) {
+  const res = await fetch(`${BACKEND}${path}`);
   if (!res.ok) throw new Error(`HTTP ${res.status} from ${path}`);
   return res.json();
 }

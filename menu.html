@@ -362,6 +362,57 @@
                 <span class="slider"></span>
               </label>
             </div>
+
+            <div class="row">
+              <span class="label">
+                <span>Damage bonuses</span>
+                <small>Show each side's citizen/ally/pact/other damage bonus, next to the game's own number.</small>
+              </span>
+              <label class="switch">
+                <input type="checkbox" id="toggle-battle-bonus" />
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="group">
+        <button type="button" class="group-hdr" id="inventory-features-btn"
+                aria-expanded="false" aria-controls="inventory-submenu">
+          <span class="label">
+            <span>Inventory</span>
+            <small>Extra stats on inventory &amp; account pages.</small>
+          </span>
+          <span class="group-count" id="inventory-count" hidden></span>
+          <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="6 9 12 15 18 9"></polyline>
+          </svg>
+        </button>
+        <div class="submenu" id="inventory-submenu">
+          <div class="submenu-inner">
+            <div class="row">
+              <span class="label">
+                <span>Export as JSON</span>
+                <small>Adds an "Export JSON" button to the inventory page.</small>
+              </span>
+              <label class="switch">
+                <input type="checkbox" id="toggle-inventory-export" />
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="row">
+              <span class="label">
+                <span>Total inventory value</span>
+                <small>Show total value (money + items) on country/MU account pages.</small>
+              </span>
+              <label class="switch">
+                <input type="checkbox" id="toggle-account-value" />
+                <span class="slider"></span>
+              </label>
+            </div>
           </div>
         </div>
       </div>

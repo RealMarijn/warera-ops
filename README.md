@@ -30,13 +30,13 @@ A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats, a l
 ### Profile & inventory
 
 - **Profile pages** — adds ranking tiles the game doesn't show by default: Bounty, Cases opened, Elite cases opened, Gems purchased, Health, and Hunger. Hovering the cases tiles shows a loot rarity breakdown.
-- **Inventory page** — an "Export JSON" button next to Craft/Dismantle that downloads your full items and equipment as JSON.
+- **Inventory page** — an "Export JSON" button next to Craft/Dismantle that downloads your full items and equipment as JSON. Independently toggleable under the popup's "Inventory" section.
 
 ### Country & MU
 
 - **Country pages** — adds Region Diff, Country Bounty, and Current Population ranking tiles, plus Daily/Weekly/Monthly Tax Revenue tiles (whitelist-gated — sign in with Discord in the popup to see these). If the country is currently a proxy/puppet of another (see [Proxy countries](#map) below), a small "(proxy of X)" badge appears next to its name, linking to that origin country (also whitelist-gated).
 - **MU pages** — adds Bounty and Invested Money ranking tiles.
-- **Country/MU account pages** — shows total inventory value (money plus all items at current market price).
+- **Country/MU account pages** — shows total inventory value (money plus all items at current market price). Independently toggleable under the popup's "Inventory" section.
 
 ### Battles
 
@@ -48,6 +48,7 @@ A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats, a l
   - Close windows with the ✕ button; closing the last one turns the "Damage lines" toggle off in the popup, so re-enabling it there spawns a fresh window.
   - A small timeline chart shows damage rate (K/min) over time since the window started tracking, for both sides.
 - **Country damage** — a companion floating window (independent on/off toggle from the tracker above) that picks one country and draws a line to every currently active battle it's dealing damage in — including battles it's not a direct belligerent of, via allies or mercenaries. Shows Total (all-time) or Now (since you last clicked "Now", with a timestamp of when that was) damage per battle, colour-split red/blue by that battle's attacker/defender ratio, plus its own timeline chart of total damage rate. Like the tracker above, you can open several windows to watch multiple countries at once.
+- **Damage bonuses** — next to the game's own personal damage-bonus number for each side, adds a concise breakdown of what every *other* group in that battle gets: Citizens, Allies, Pact countries (defender side, when applicable), and Other. Hover either side's badge for the complete breakdown table (per-source bonus: home/enemy/pact/alliance/order/MU/upgrade/revolt), matching what the companion website's own "Live battles" page shows.
 
 ### Map
 
@@ -56,7 +57,7 @@ A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats, a l
 
 ### Extension controls
 
-- **Popup menu** (toolbar icon) — toggle Extra stats, the Damage tracker, Country damage, Core country colors, and (if you're on the whitelist) Proxy countries on or off independently, and sign in with Discord for features that need it.
+- **Popup menu** (toolbar icon) — toggle Extra stats, the Damage tracker, Country damage, Core country colors, and (if you're on the whitelist) Proxy countries on or off independently; expand **Map features**, **Battle features**, or **Inventory** for the rest (Open contracts, Damage bonuses, Export as JSON, Total inventory value, and more) — and sign in with Discord for features that need it.
 
 ## Signing in with Discord
 

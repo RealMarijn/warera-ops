@@ -173,6 +173,13 @@
 
   function sync() {
     if (!active || !window.WarEraOps.isEnabled()) return;
+    // Per-feature toggle (popup "Total inventory value", under Inventory). Separate from the
+    // global extra-stats switch — off means remove the entry and stop, same pattern as
+    // battle-contracts.js's "Open contracts" toggle.
+    if (!featureEnabled) {
+      document.querySelectorAll(`[${MARKER_ATTR}]`).forEach((el) => el.remove());
+      return;
+    }
     if (!isAccountPage()) return;
 
     const container = findInventoryContainer();
@@ -195,6 +202,10 @@
   let pollInterval = null;
   let lastPath = null;
   let scheduled = false;
+  let featureEnabled = true; // popup key "accountInventoryValueEnabled" (default on)
+  let storageListener = null;
+
+  const FEATURE_KEY = "accountInventoryValueEnabled";
 
   function scheduleSync() {
     if (!active || scheduled) return;
@@ -207,6 +218,18 @@
 
   function activate() {
     active = true;
+
+    // Watch the per-feature toggle independently of the global extra-stats switch.
+    storageListener = (changes, area) => {
+      if (area !== "local" || !(FEATURE_KEY in changes)) return;
+      featureEnabled = changes[FEATURE_KEY].newValue !== false;
+      scheduleSync();
+    };
+    browser.storage.onChanged.addListener(storageListener);
+    browser.storage.local.get(FEATURE_KEY).then((v) => {
+      featureEnabled = v[FEATURE_KEY] !== false; // default on
+      scheduleSync();
+    });
 
     // WarEra re-renders this row client-side (route changes), which can wipe our injected entry
     // since React doesn't know about it — watch and re-add.
@@ -226,6 +249,10 @@
 
   function deactivate() {
     active = false;
+    if (storageListener) {
+      browser.storage.onChanged.removeListener(storageListener);
+      storageListener = null;
+    }
     if (observer) {
       observer.disconnect();
       observer = null;

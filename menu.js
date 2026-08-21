@@ -5,6 +5,9 @@
 //   wdlCountryEnabled     -> the "Country damage" card (tools/dmg-lines), independent of wdlEnabled
 //   coreColorsEnabled     -> the core-country-colors map mode (tools/dmg-lines/map.js)
 //   showProxyEnabled      -> the proxy-country overlay (tools/dmg-lines), whitelist-gated
+//   battleBonusEnabled    -> the per-side damage-bonus breakdown on battle pages (battle-bonus.js)
+//   inventoryExportEnabled       -> the "Export JSON" button on the inventory page (inventory-export.js)
+//   accountInventoryValueEnabled -> total inventory value on country/MU account pages (account-inventory-value.js)
 const toggles = [
   { el: document.getElementById("toggle-stats"), key: "warera-ops-enabled", defaultOn: true },
   { el: document.getElementById("toggle-dmg"), key: "wdlEnabled", defaultOn: true },
@@ -15,9 +18,13 @@ const toggles = [
   { el: document.getElementById("toggle-bases"), key: "showBasesEnabled", defaultOn: false },
   { el: document.getElementById("toggle-bunkers"), key: "showBunkersEnabled", defaultOn: false },
   { el: document.getElementById("toggle-resistance"), key: "showResistanceEnabled", defaultOn: false },
-  { el: document.getElementById("toggle-proxy"), key: "showProxyEnabled", defaultOn: false },
+  { el: document.getElementById("toggle-proxy"), key: "showProxyEnabled", defaultOn: true },
   // Battle-view stat features (watched by their own feature scripts, e.g. battle-contracts.js).
   { el: document.getElementById("toggle-open-contracts"), key: "openContractsEnabled", defaultOn: true },
+  { el: document.getElementById("toggle-battle-bonus"), key: "battleBonusEnabled", defaultOn: true },
+  // Inventory/account page features (watched by their own feature scripts).
+  { el: document.getElementById("toggle-inventory-export"), key: "inventoryExportEnabled", defaultOn: true },
+  { el: document.getElementById("toggle-account-value"), key: "accountInventoryValueEnabled", defaultOn: true },
 ];
 
 const keys = toggles.map((t) => t.key);
@@ -27,6 +34,7 @@ browser.storage.local.get(keys).then((v) => {
   }
   updateMapCount();
   updateBattleCount();
+  updateInventoryCount();
 });
 
 for (const t of toggles) {
@@ -89,7 +97,7 @@ for (const el of mapFeatureEls) el.addEventListener("change", updateMapCount);
 // ── "Battle features" collapsible group ───────────────────────────────────
 // Same accordion pattern as the map group, for stat features injected into the
 // battle view (currently just Open contracts).
-const battleFeatureKeys = ["openContractsEnabled"];
+const battleFeatureKeys = ["openContractsEnabled", "battleBonusEnabled"];
 const battleFeatureEls = battleFeatureKeys
   .map((key) => toggles.find((t) => t.key === key)?.el)
   .filter(Boolean);
@@ -111,6 +119,32 @@ if (battleBtn && battleSubmenu) {
   });
 }
 for (const el of battleFeatureEls) el.addEventListener("change", updateBattleCount);
+
+// ── "Inventory" collapsible group ──────────────────────────────────────────
+// Same accordion pattern as the map/battle groups, for stat features on
+// inventory/account pages.
+const inventoryFeatureKeys = ["inventoryExportEnabled", "accountInventoryValueEnabled"];
+const inventoryFeatureEls = inventoryFeatureKeys
+  .map((key) => toggles.find((t) => t.key === key)?.el)
+  .filter(Boolean);
+const inventoryBtn = document.getElementById("inventory-features-btn");
+const inventorySubmenu = document.getElementById("inventory-submenu");
+const inventoryCountEl = document.getElementById("inventory-count");
+
+function updateInventoryCount() {
+  if (!inventoryCountEl) return;
+  const n = inventoryFeatureEls.filter((el) => el.checked).length;
+  inventoryCountEl.textContent = `${n} on`;
+  inventoryCountEl.hidden = n === 0;
+}
+
+if (inventoryBtn && inventorySubmenu) {
+  inventoryBtn.addEventListener("click", () => {
+    const open = inventorySubmenu.classList.toggle("open");
+    inventoryBtn.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+}
+for (const el of inventoryFeatureEls) el.addEventListener("change", updateInventoryCount);
 
 // ── Discord login (whitelist-gated access to our backend) ─────────────────
 // All the actual auth logic (pairing, token storage, refresh) lives in
