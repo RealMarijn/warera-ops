@@ -28,8 +28,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlPanel = "1.19.0"; } catch (_) {}
-  console.log("[WDL] overlay.js panel v1.19.0 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlPanel = "1.19.1"; } catch (_) {}
+  console.log("[WDL] overlay.js panel v1.19.1 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const FLAG = (code) => `https://media.warera.io/images/flags/${code}.svg?v=16`;
@@ -1015,7 +1015,7 @@
   // check whitelist eligibility and poll the whitelist-gated backend. Mirrors
   // base-overlay.js's auth/poll pattern exactly (see BACKEND_API.md).
   const PROXY_STORAGE_KEY = "showProxyEnabled";
-  const PROXY_POLL_MS = 2 * 60 * 1000; // matches base-overlay.js's cadence for similar backend data
+  const PROXY_POLL_MS = 10 * 60 * 1000; // matches base-overlay.js's cadence for similar backend data
   let proxyFeatureEnabled = false; // user's toggle intent (popup/menu) — off by default, opt-in
   let proxyLoggedIn = false;
   let proxyPollTimer = null;

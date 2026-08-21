@@ -12,8 +12,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wbmPanel = "0.3.0"; } catch (_) {}
-  console.log("[WBM] base-overlay.js panel v0.3.0 loaded");
+  try { document.documentElement.dataset.wbmPanel = "0.3.1"; } catch (_) {}
+  console.log("[WBM] base-overlay.js panel v0.3.1 loaded");
 
   const CHANNEL = "warera-base-map";
   // Toast-notification layers only — resistance is a live number, not an
@@ -21,7 +21,10 @@
   // toasting (see POLL_LAYERS below for the actual full poll/relay set).
   const LAYERS = ["bases", "bunkers"];
   const POLL_LAYERS = ["bases", "bunkers", "resistance"];
-  const POLL_MS = 2 * 60 * 1000; // spec: refresh every 2 minutes
+  // Backend data is only refreshed hourly server-side (see BACKEND_API.md), so a much tighter
+  // poll here just wastes requests without ever finding anything newer — 10 min still catches an
+  // hourly update quickly.
+  const POLL_MS = 10 * 60 * 1000;
   const PATH = {
     bases: "/api/ext/regions/bases",
     bunkers: "/api/ext/regions/bunkers",
