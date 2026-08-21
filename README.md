@@ -29,35 +29,32 @@ A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats, a l
 
 ### Profile & inventory
 
-- **Profile pages** — adds ranking tiles the game doesn't show by default: Bounty, Cases opened, Elite cases opened, Gems purchased, Health, and Hunger. Hovering the cases tiles shows a loot rarity breakdown.
-- **Inventory page** — an "Export JSON" button next to Craft/Dismantle that downloads your full items and equipment as JSON. Independently toggleable under the popup's "Inventory" section.
+- **Profile pages** — extra ranking tiles: Bounty, Cases opened, Elite cases opened, Gems purchased, Health, Hunger. Hover a cases tile for a loot rarity breakdown.
+- **Inventory page** — "Export JSON" button next to Craft/Dismantle, for your full items and equipment.
 
 ### Country & MU
 
-- **Country pages** — adds Region Diff, Country Bounty, and Current Population ranking tiles, plus Daily/Weekly/Monthly Tax Revenue tiles (whitelist-gated — sign in with Discord in the popup to see these). If the country is currently a proxy/puppet of another (see [Proxy countries](#map) below), a small "(proxy of X)" badge appears next to its name, linking to that origin country (also whitelist-gated).
-- **MU pages** — adds Bounty and Invested Money ranking tiles.
-- **Country/MU account pages** — shows total inventory value (money plus all items at current market price). Independently toggleable under the popup's "Inventory" section.
+- **Country pages** — Region Diff, Country Bounty, and Current Population tiles, plus Tax Revenue tiles (whitelist-gated). Shows a "(proxy of X)" badge if the country is currently a proxy (see [Map](#map)).
+- **MU pages** — Bounty and Invested Money tiles.
+- **Country/MU account pages** — total inventory value (money + all items at market price).
 
 ### Battles
 
-- **Battle pages** — shows the true total money earned per side (attacker/defender), fetched from the full battle ranking rather than only what's been scrolled into view.
-- **LIVE Damage tracker** — a floating window on the map with real-time damage-flow lines for a battle: one line from every contributing country toward the contested region, colour-coded and sized by how much damage they're currently dealing, with each fighting nation's total damage rate shown right next to its name.
-  - Pick any active battle from a searchable dropdown (favourites, your country, with orders, allies, enemies, etc.) — you don't need the battle page open to watch it.
-  - Open several tracker windows at once (**+** button) to watch multiple battles side by side. They're linked by default — drag one and they all move together; detach one (⛓ button) to reposition it independently, and reattach it later. Whichever window you clicked last is the "active" one; only its lines are drawn on the map, so the map doesn't get cluttered with every open battle at once.
-  - Collapsed by default to just the two fighting countries and the region; click "Show supporting countries" to expand the full per-country damage breakdown, which scrolls and can be resized taller.
-  - Close windows with the ✕ button; closing the last one turns the "Damage lines" toggle off in the popup, so re-enabling it there spawns a fresh window.
-  - A small timeline chart shows damage rate (K/min) over time since the window started tracking, for both sides.
-- **Country damage** — a companion floating window (independent on/off toggle from the tracker above) that picks one country and draws a line to every currently active battle it's dealing damage in — including battles it's not a direct belligerent of, via allies or mercenaries. Shows Total (all-time) or Now (since you last clicked "Now", with a timestamp of when that was) damage per battle, colour-split red/blue by that battle's attacker/defender ratio, plus its own timeline chart of total damage rate. Like the tracker above, you can open several windows to watch multiple countries at once.
-- **Damage bonuses** — next to the game's own personal damage-bonus number for each side, adds a concise breakdown of what every *other* group in that battle gets: Citizens, Allies, Pact countries (defender side, when applicable), and Other. Hover either side's badge for the complete breakdown table (per-source bonus: home/enemy/pact/alliance/order/MU/upgrade/revolt), matching what the companion website's own "Live battles" page shows.
+- **Battle pages** — true total money earned per side, from the full battle ranking rather than just what's scrolled into view.
+- **LIVE Damage tracker** — floating window(s) with real-time damage-flow lines per battle, colour-coded and sized by country, plus a K/min timeline. Pick any active battle from a searchable dropdown; open several windows to watch multiple battles at once.
+- **Country damage** — a companion window that tracks one country's damage across every active battle it's involved in, including via allies/mercenaries — Total or Now (since last reset), colour-split by attacker/defender ratio, plus its own timeline.
+- **Damage bonuses** — a "Bonuses" button beside each side's own bonus number, showing the Citizens/Allies/Pact/Other breakdown on hover.
 
 ### Map
 
-- **Core country colors** (off by default) — recolors every region by its *original* owning country instead of whoever currently controls it, using the same colors WarEra's own map already uses per country. Useful for seeing at a glance how much of a country's original territory has actually been conquered.
-- **Proxy countries** (whitelist-gated) — flags a country as a proxy/puppet when most of its recent citizens immigrated from one other ("origin") country. Adds a small flag + "proxy of X" label under that country's own native flag on the map, in the origin's real label colour and font. Countries too small to ever get their own flag on the map (no room for WarEra to draw one) are skipped rather than shown floating disconnected from anything.
+- **Military bases / Bunkers** (whitelist-gated) — marks regions with an active or activating base/bunker, with a live countdown and a toast alert when one lights up.
+- **Resistance** (whitelist-gated) — each region's current/max resistance, colour-coded, on the map.
+- **Core country colors** (off by default) — colours regions by their *original* owner instead of whoever currently controls them.
+- **Proxy countries** (whitelist-gated) — flags puppet countries and shows the controlling ("origin") country's flag on the map.
 
 ### Extension controls
 
-- **Popup menu** (toolbar icon) — toggle Extra stats, the Damage tracker, Country damage, Core country colors, and (if you're on the whitelist) Proxy countries on or off independently; expand **Map features**, **Battle features**, or **Inventory** for the rest (Open contracts, Damage bonuses, Export as JSON, Total inventory value, and more) — and sign in with Discord for features that need it.
+- **Popup menu** (toolbar icon) — toggle Extra stats, Damage tracker, Country damage, Core country colors, and Proxy countries directly; expand **Map features**, **Battle features**, or **Inventory** for the rest. Sign in with Discord here too, for features that need it.
 
 ## Signing in with Discord
 

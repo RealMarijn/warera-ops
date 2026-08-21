@@ -58,11 +58,12 @@ const mapBtn = document.getElementById("map-features-btn");
 const mapSubmenu = document.getElementById("map-submenu");
 const mapCountEl = document.getElementById("map-count");
 
-// Bases/bunkers/resistance/proxy pull from the whitelist-gated backend, so
-// their menu rows only exist for logged-in (approved) users. Hidden until
-// auth resolves, and not counted in the "N on" pill while hidden.
+// Bases/bunkers/resistance/proxy/damage-bonuses all pull from the whitelist-gated backend
+// (every /api/ext/... endpoint requires it, no exceptions — see BACKEND_API.md), so their menu
+// rows only exist for logged-in (approved) users. Hidden until auth resolves, and not counted in
+// the "N on" pill while hidden.
 const authGatedEls = new Set(
-  ["showBasesEnabled", "showBunkersEnabled", "showResistanceEnabled", "showProxyEnabled"]
+  ["showBasesEnabled", "showBunkersEnabled", "showResistanceEnabled", "showProxyEnabled", "battleBonusEnabled"]
     .map((k) => toggles.find((t) => t.key === k)?.el).filter(Boolean),
 );
 const authGatedRows = [
@@ -70,6 +71,7 @@ const authGatedRows = [
   document.getElementById("row-bunkers"),
   document.getElementById("row-resistance"),
   document.getElementById("row-proxy"),
+  document.getElementById("row-battle-bonus"),
 ].filter(Boolean);
 let authGated = true; // assume not-approved until WARERA_OPS_AUTH_STATUS says otherwise
 
@@ -77,6 +79,7 @@ function applyAuthGate(loggedIn) {
   authGated = !loggedIn;
   for (const row of authGatedRows) row.hidden = authGated;
   updateMapCount();
+  updateBattleCount();
 }
 
 function updateMapCount() {
@@ -107,7 +110,7 @@ const battleCountEl = document.getElementById("battle-count");
 
 function updateBattleCount() {
   if (!battleCountEl) return;
-  const n = battleFeatureEls.filter((el) => el.checked).length;
+  const n = battleFeatureEls.filter((el) => el.checked && !(authGated && authGatedEls.has(el))).length;
   battleCountEl.textContent = `${n} on`;
   battleCountEl.hidden = n === 0;
 }

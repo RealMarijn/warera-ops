@@ -6,8 +6,10 @@
 // breakdown — Own citizens / Allies / Pact countries / Other, same table rijksoverheid_web's own
 // "Live battles" page already renders (Home/Enemy/Pact/Ally/Order/MU-ord/MU-HQ/Upgrade/Revolt/Max
 // per group) — fetched from that same live snapshot for the one battle currently open.
-// Deliberately NOT whitelist-gated: see BACKEND_API.md's "public backend endpoints" section —
-// the exact same data is already public, unauthenticated, on the website itself.
+// Whitelist-gated: /api/ext/battles/{id}/bonus (see BACKEND_API.md) requires a valid session —
+// this used to be a public endpoint (the underlying data happens to already be public elsewhere
+// on the website) but was moved behind the whitelist as a matter of policy: every extension
+// backend endpoint is whitelist-only, with no "it's already public anyway" exceptions.
 (function () {
   // Same stack + weight already confirmed live for WarEra's own UI text elsewhere in this
   // extension (see tools/dmg-lines/map.js's FLAG_FONT) — Saira is the game's actual webfont, not
@@ -48,12 +50,15 @@
     hideTooltip();
     try {
       const result = await browser.runtime.sendMessage({
-        type: "WARERA_OPS_BACKEND_FETCH",
-        path: `/api/gevechten/battle/${battleId}/bonus`,
+        type: "WARERA_OPS_AUTHED_FETCH",
+        path: `/api/ext/battles/${battleId}/bonus`,
+        method: "GET",
       });
-      data = result && result.ok ? result : null;
+      data = result || null;
     } catch (err) {
-      data = null; // battle not tracked yet, backend unreachable, etc. — feature just doesn't show
+      // Not logged in / not whitelisted / battle not tracked yet / backend unreachable — in every
+      // case the feature just doesn't show, same as the other whitelist-gated features.
+      data = null;
     } finally {
       fetching = false;
       tryInject();

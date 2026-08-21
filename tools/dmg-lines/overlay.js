@@ -28,8 +28,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlPanel = "1.19.1"; } catch (_) {}
-  console.log("[WDL] overlay.js panel v1.19.1 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlPanel = "1.19.2"; } catch (_) {}
+  console.log("[WDL] overlay.js panel v1.19.2 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const FLAG = (code) => `https://media.warera.io/images/flags/${code}.svg?v=16`;
@@ -1079,7 +1079,7 @@
       if (ch.wdlEnabled) setEnabled(ch.wdlEnabled.newValue !== false);
       if (ch.coreColorsEnabled) relayCoreColors(ch.coreColorsEnabled.newValue === true);
       if (ch.wdlCountryEnabled) setCountryFeatureEnabled(ch.wdlCountryEnabled.newValue !== false);
-      if (ch[PROXY_STORAGE_KEY]) setProxyFeatureEnabled(ch[PROXY_STORAGE_KEY].newValue === true);
+      if (ch[PROXY_STORAGE_KEY]) setProxyFeatureEnabled(ch[PROXY_STORAGE_KEY].newValue !== false);
       // Login/logout lands as token changes in storage (background.js owns these); runtime
       // broadcasts don't reach content scripts, so this is how the proxy feature notices too.
       if ("wopsRefreshToken" in ch || "wopsAccessToken" in ch) refreshProxyAuth();
@@ -1619,8 +1619,11 @@
           setCountryFeatureEnabled(v.wdlCountryEnabled !== false);
           relayCoreColors(v.coreColorsEnabled === true);
           // Whitelist-gated — actual on/off also depends on refreshProxyAuth's login check
-          // (see proxyEff), which relays config + starts polling once that resolves.
-          proxyFeatureEnabled = v[PROXY_STORAGE_KEY] === true;
+          // (see proxyEff), which relays config + starts polling once that resolves. !== false
+          // (not === true) so a never-yet-written storage key still defaults to on, matching
+          // wdlEnabled/wdlCountryEnabled above — this used to default off (=== true was correct
+          // then), and was missed when the default flipped to on.
+          proxyFeatureEnabled = v[PROXY_STORAGE_KEY] !== false;
           refreshProxyAuth();
         }
       );
