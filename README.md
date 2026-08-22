@@ -35,14 +35,14 @@ A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats, a l
 ### Country & MU
 
 - **Country pages** — Region Diff, Country Bounty, and Current Population tiles, plus Tax Revenue tiles (whitelist-gated). Shows a "(proxy of X)" badge if the country is currently a proxy (see [Map](#map)).
-- **MU pages** — Bounty and Invested Money tiles.
+- **MU pages** — Bounty, # players in buff/debuff, and Invested Money tiles.
 - **Country/MU account pages** — total inventory value (money + all items at market price).
 
 ### Battles
 
 - **Battle pages** — true total money earned per side, from the full battle ranking rather than just what's scrolled into view.
 - **LIVE Damage tracker** — floating window(s) with real-time damage-flow lines per battle, colour-coded and sized by country, plus a K/min timeline. Pick any active battle from a searchable dropdown; open several windows to watch multiple battles at once.
-- **Country damage** — a companion window that tracks one country's damage across every active battle it's involved in, including via allies/mercenaries — Total or Now (since last reset), colour-split by attacker/defender ratio, plus its own timeline.
+- **Country/MU damage** — a companion window that tracks one country's/MU's damage across every active battle it's involved in, including via allies/mercenaries — Total or Now (since last reset), colour-split by attacker/defender ratio, plus its own timeline.
 - **Damage bonuses** — a "Bonuses" button beside each side's own bonus number, showing the Citizens/Allies/Pact/Other breakdown on hover.
 
 ### Map

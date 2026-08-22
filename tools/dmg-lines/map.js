@@ -37,8 +37,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlEngine = "0.38.0"; } catch (_) {}
-  console.log("[WDL] map.js engine v0.38.0 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlEngine = "0.39.2"; } catch (_) {}
+  console.log("[WDL] map.js engine v0.39.2 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const NS = "http://www.w3.org/2000/svg";
@@ -56,6 +56,11 @@
   let countryRegionCount = {};   // countryId -> number of core regions (all of them, not just the main cluster)
   let countryRankByRegionCount = []; // countryIds sorted by countryRegionCount, descending
   let countryRankIndex = new Map();  // countryId -> its index in countryRankByRegionCount (0 = biggest)
+  // MU metadata for the "Country damage" window's MU mode (see fetchAllMus below) — muId -> { name, countryId }.
+  // Unlike countryMeta this is fetched lazily (only once a window actually switches to "mu" mode), since
+  // it takes ~14 paginated requests for ~1300 MUs vs. country.getAllCountries' single cheap call.
+  let muMeta = {};
+  let muListState = "idle"; // "idle" | "loading" | "ready"
   let ready = false;
   let enabled = true;
   // Last-seen URL path, used to detect navigating to a battle page (clicking a battle pin on the
@@ -1019,12 +1024,14 @@
   //                            // at each scan, for the timeline chart — always "since this country
   //                            // was selected", independent of the Total/Now display window above
   //   startedAt: number|null,  // when the current selection started; null while nothing's selected
+  //   entityType: "country"|"mu",  // what `sel` refers to — see selectCountry
   // }
   const ensureCountryPanel = (panelId) => {
     let p = countryPanels.get(panelId);
     if (!p) {
       p = {
-        sel: null, window: "total", nowBaseline: null, nowSplitBaseline: null,
+        sel: null, entityType: "country", window: "total", nowBaseline: null, nowSplitBaseline: null,
+        nowBaselinePending: false, // see applyCountryScan — true right after a re-selection made while in "now" mode
         targets: new Map(), prevDmg: new Map(), prevSplit: new Map(), pulseUntil: new Map(),
         nextFullAt: 0, nextFastAt: 0, fastTimer: null, fullTimer: null, history: [], startedAt: null,
       };
@@ -1404,40 +1411,43 @@
     for (const id of [...activeBattleIndex.keys()]) if (!ids.has(id)) activeBattleIndex.delete(id);
   };
 
-  // A window's country's damage in one battle (merged ranking lists every country on both sides —
+  // A window's country/MU damage in one battle (merged ranking lists every entity on both sides —
   // cheap discovery pass, used first to decide whether this battle is worth showing at all).
-  const fetchCountryDamage = async (battleId, cid) => {
+  // `entityType` is "country" or "mu" — battleRanking.getRanking's `type` param and each item's own
+  // id field both follow it directly (an item is `{country, value}` or `{mu, value}`, see
+  // BACKEND_API.md's battles/{battleId}/bonus doc for the same country-side shape server-side).
+  const fetchEntityDamage = async (battleId, entityType, id) => {
     try {
-      const d = await trpcRaw("battleRanking.getRanking", { battleId, type: "country", dataType: "damage", side: "merged" });
+      const d = await trpcRaw("battleRanking.getRanking", { battleId, type: entityType, dataType: "damage", side: "merged" });
       const items = (d && d.items) || [];
-      const row = items.find((x) => x.country === cid);
+      const row = items.find((x) => x[entityType] === id);
       return row ? (row.value || 0) : 0;
     } catch (_) { return 0; }
   };
 
-  // The attacker/defender split of a country's damage in one battle — only fetched for battles
-  // that already came back with nonzero merged damage (see scanCountryDamage below), so this
+  // The attacker/defender split of a country/MU's damage in one battle — only fetched for battles
+  // that already came back with nonzero merged damage (see scanEntityDamage below), so this
   // doesn't double the request volume of the ~80-battle discovery pass, only the much smaller set
   // of battles actually worth drawing. Used to color that battle's line/bar red-vs-blue instead of
   // the flat yellow the merged total alone can't distinguish.
-  const fetchCountrySideSplit = async (battleId, cid) => {
+  const fetchEntitySideSplit = async (battleId, entityType, id) => {
     try {
       const [attD, defD] = await Promise.all([
-        trpcRaw("battleRanking.getRanking", { battleId, type: "country", dataType: "damage", side: "attacker" }),
-        trpcRaw("battleRanking.getRanking", { battleId, type: "country", dataType: "damage", side: "defender" }),
+        trpcRaw("battleRanking.getRanking", { battleId, type: entityType, dataType: "damage", side: "attacker" }),
+        trpcRaw("battleRanking.getRanking", { battleId, type: entityType, dataType: "damage", side: "defender" }),
       ]);
-      const attRow = ((attD && attD.items) || []).find((x) => x.country === cid);
-      const defRow = ((defD && defD.items) || []).find((x) => x.country === cid);
+      const attRow = ((attD && attD.items) || []).find((x) => x[entityType] === id);
+      const defRow = ((defD && defD.items) || []).find((x) => x[entityType] === id);
       return { att: attRow ? (attRow.value || 0) : 0, def: defRow ? (defRow.value || 0) : 0 };
     } catch (_) { return { att: 0, def: 0 }; }
   };
 
   // Two-stage scan shared by the fast/full tiers: cheap merged-damage discovery across `ids`, then
   // the (attacker/defender) split fetched only for whichever came back nonzero.
-  const scanCountryDamage = async (ids, sel) => {
-    const raw = await mapLimit(ids, RANK_CONCURRENCY, async (id) => ({ id, dmg: await fetchCountryDamage(id, sel) }));
+  const scanEntityDamage = async (ids, entityType, sel) => {
+    const raw = await mapLimit(ids, RANK_CONCURRENCY, async (id) => ({ id, dmg: await fetchEntityDamage(id, entityType, sel) }));
     const hitIds = raw.filter((r) => r.dmg > 0).map((r) => r.id);
-    const splits = await mapLimit(hitIds, RANK_CONCURRENCY, async (id) => ({ id, split: await fetchCountrySideSplit(id, sel) }));
+    const splits = await mapLimit(hitIds, RANK_CONCURRENCY, async (id) => ({ id, split: await fetchEntitySideSplit(id, entityType, sel) }));
     const splitById = new Map(splits.map((s) => [s.id, s.split]));
     return raw.map((r) => {
       const s = splitById.get(r.id) || { att: 0, def: 0 };
@@ -1493,6 +1503,17 @@
   const applyCountryScan = (panelId, sel, results) => {
     const p = countryPanels.get(panelId);
     if (!p || p.sel !== sel) return; // window closed, or its selection changed mid-scan
+    // A fresh selection made while already in "now" mode (picking a different country/MU, or
+    // switching entityType back to one with a remembered pick) has no prevDmg yet to baseline
+    // against — selectCountry marks nowBaselinePending instead of capturing one immediately, so
+    // THIS first scan's raw totals become the zero-point, same as if "Now" had just been clicked
+    // at this exact moment. Without this, windowedDamage would show the full raw cumulative total
+    // (base=0) for a scan cycle instead of "damage since selecting this".
+    if (p.window === "now" && p.nowBaselinePending) {
+      p.nowBaseline = new Map(results.map((r) => [r.id, r.dmg]));
+      p.nowSplitBaseline = new Map(results.map((r) => [r.id, { att: r.att, def: r.def }]));
+      p.nowBaselinePending = false;
+    }
     const now = Date.now();
     let pulsed = false;
     for (const { id, dmg, att, def } of results) {
@@ -1541,21 +1562,28 @@
     if (!p || !p.sel) return;
     const sel = p.sel;
     const ids = [...activeBattleIndex.keys()];
-    const results = await scanCountryDamage(ids, sel);
+    const results = await scanEntityDamage(ids, p.entityType, sel);
     applyCountryScan(panelId, sel, results);
   };
 
-  // Battles where `sel` is a declared attacker/defender — the "fast" tier only ever needs to
-  // re-check these (its whole point is being cheap: usually just a handful of ids, not all ~80).
+  // Battles where `sel` is a declared attacker/defender country — the "fast" tier only ever needs
+  // to re-check these (its whole point is being cheap: usually just a handful of ids, not all ~80).
   // Also used to decide which refresh timer the countdown UI should reflect — see postCountrySummary.
-  const fastBattleIds = (sel) =>
-    [...activeBattleIndex.entries()].filter(([, idx]) => idx.att === sel || idx.def === sel).map(([id]) => id);
+  // activeBattleIndex only records each battle's two COUNTRY sides, not any MU orders on it, so
+  // there's no cheap way to know a MU's own battles without scanning all of them — MU mode always
+  // relies on the full-scan tier alone (see countryFastScan's no-op below for entityType "mu").
+  const fastBattleIds = (sel, entityType) => {
+    if (entityType === "mu") return [];
+    return [...activeBattleIndex.entries()].filter(([, idx]) => idx.att === sel || idx.def === sel).map(([id]) => id);
+  };
 
   const countryFastScan = async (panelId) => {
     const p = countryPanels.get(panelId);
     if (!p || !p.sel) return;
     const sel = p.sel;
-    const results = await scanCountryDamage(fastBattleIds(sel), sel);
+    const ids = fastBattleIds(sel, p.entityType);
+    if (!ids.length) return; // MU mode (or a country with no battle of its own) — nothing extra to do here
+    const results = await scanEntityDamage(ids, p.entityType, sel);
     applyCountryScan(panelId, sel, results);
   };
 
@@ -1609,9 +1637,68 @@
     window.postMessage({ __wdl: CHANNEL, kind: "countryList", countries }, location.origin);
   };
 
+  // A MU has no map position of its own — its "by country" origin is its HOME country's position
+  // (countryPos[muMeta[muId].countryId]), same dot marker drawCountry already draws, just anchored
+  // differently. A MU with no resolvable home country can't be anchored, so it's left out here the
+  // same way sendCountryList excludes countries with no countryPos.
+  const sendMuList = () => {
+    const mus = Object.keys(muMeta)
+      .filter((mid) => countryPos[muMeta[mid].countryId])
+      .map((mid) => ({ mid, name: muMeta[mid].name || "?", countryId: muMeta[mid].countryId }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    window.postMessage({ __wdl: CHANNEL, kind: "muList", mus, loading: muListState === "loading" }, location.origin);
+  };
+
+  // Paginates mu.getManyPaginated (the same proc full_fetcher.py uses server-side to build its own
+  // known_mus registry) to get every MU's name + home country directly from WarEra, with no backend
+  // of ours involved — mirrors country.getAllCountries' role for countries. ~14 requests for the
+  // ~1300 MUs that currently exist; only ever run once (idempotent — see ensureMuList).
+  const fetchAllMus = async () => {
+    muListState = "loading";
+    let cursor = null;
+    try {
+      do {
+        const params = { limit: 100 };
+        if (cursor) params.cursor = cursor;
+        const raw = await trpcRaw("mu.getManyPaginated", params);
+        // Confirmed live: NOT superjson-wrapped — result.data has items/nextCursor directly. The
+        // `.json` fallback stays anyway since other procs elsewhere in this file (e.g.
+        // battle.getGroupedActiveBattles) do need it and aren't all consistent with each other.
+        const d = (raw && raw.json) || raw || {};
+        const items = d.items || (Array.isArray(d) ? d : []);
+        for (const item of items) {
+          if (!item) continue;
+          const mid = item._id || item.id;
+          if (!mid) continue;
+          // Confirmed live: `country` is a plain country-id STRING here, not an embedded object
+          // (unlike battle.getById's attacker/defender.country, which also happens to be a plain
+          // string, so this is at least consistent with that one).
+          const rawCountry = item.country || item.nation;
+          const countryId = typeof rawCountry === "string" ? rawCountry
+            : (rawCountry && (rawCountry._id || rawCountry.id)) || item.countryId || item.country_id || null;
+          muMeta[mid] = { name: item.name || item.title || "?", countryId };
+        }
+        cursor = d.nextCursor || d.cursor || null;
+      } while (cursor);
+      muListState = "ready";
+    } catch (err) {
+      console.warn("[WDL] fetchAllMus failed:", err);
+      muListState = "ready"; // serve whatever partial list we got rather than retrying forever
+    }
+    sendMuList(); // update every window whose combo is open, even if it wasn't the one that asked
+  };
+
+  let muListPromise = null;
+  const ensureMuList = () => {
+    if (muListState === "ready") { sendMuList(); return; }
+    sendMuList(); // "loading" placeholder immediately, so the combo shows something right away
+    if (!muListPromise) muListPromise = fetchAllMus();
+  };
+
   const postCountrySummary = (panelId) => {
     const p = countryPanels.get(panelId);
     const sel = p ? p.sel : null;
+    const entityType = p ? p.entityType : "country";
     const targets = sel
       ? [...p.targets.entries()]
           .map(([, t]) => ({ regionName: (regionMeta[t.region] && regionMeta[t.region].name) || null, damage: t.damage, ratio: t.ratio }))
@@ -1619,13 +1706,14 @@
       : [];
     window.postMessage({
       __wdl: CHANNEL, kind: "countrySummary", panelId,
-      countryId: sel,
-      name: sel ? ((countryMeta[sel] && countryMeta[sel].name) || "?") : null,
+      countryId: sel, entityType,
+      name: sel ? ((entityType === "mu" ? muMeta[sel] : countryMeta[sel]) || {}).name || "?" : null,
       targets, total: targets.reduce((s, t) => s + t.damage, 0),
       // The full-scan timer (30s) is what discovers NEW merc/ally involvement, but if this country
       // already has a battle of its own active, the fast timer (10s) is what's actually refreshing
       // its numbers — show whichever one is the truthful "next update", not always the slower one.
-      nextUpdateAt: sel ? (fastBattleIds(sel).length ? Math.min(p.nextFullAt, p.nextFastAt) : p.nextFullAt) : 0,
+      // Always the full-scan cadence in MU mode — see fastBattleIds.
+      nextUpdateAt: sel ? (fastBattleIds(sel, entityType).length ? Math.min(p.nextFullAt, p.nextFastAt) : p.nextFullAt) : 0,
       history: sel ? p.history : [],
       startedAt: sel ? p.startedAt : null,
     }, location.origin);
@@ -1642,21 +1730,27 @@
     if (win === "now") {
       p.nowBaseline = new Map(p.prevDmg);
       p.nowSplitBaseline = new Map(p.prevSplit);
+      p.nowBaselinePending = false; // baseline just captured directly — no need for the scan-time fallback
     }
     recomputeCountryPanelTargets(p);
     if (panelId === activeCountryPanelId) drawCountry();
     postCountrySummary(panelId);
   };
 
-  const selectCountry = (panelId, cid) => {
+  const selectCountry = (panelId, cid, entityType) => {
     const p = ensureCountryPanel(panelId);
     p.sel = cid || null;
+    if (entityType === "country" || entityType === "mu") p.entityType = entityType;
     p.targets.clear();
     p.prevDmg.clear();
     p.prevSplit.clear();
     p.pulseUntil.clear();
     p.nowBaseline = null;
     p.nowSplitBaseline = null;
+    // If "now" is already the active window, this new selection has no prevDmg yet to baseline
+    // against right now — defer it to the first scan result instead of leaving it at "no baseline"
+    // (which windowedDamage would otherwise read as "show the full raw total"). See applyCountryScan.
+    p.nowBaselinePending = p.window === "now" && !!p.sel;
     p.nextFullAt = 0;
     p.nextFastAt = 0;
     p.history = [];
@@ -1705,7 +1799,10 @@
     if (!gCountryArcs) return;
     const p = activeCountryPanelId ? countryPanels.get(activeCountryPanelId) : null;
     const sel = p ? p.sel : null;
-    const origin = sel && countryPos[sel];
+    // A MU has no map position of its own — anchor at its home country's position instead (see
+    // sendMuList/muMeta above).
+    const originId = sel && p.entityType === "mu" ? (muMeta[sel] && muMeta[sel].countryId) : sel;
+    const origin = originId && countryPos[originId];
     if (!countryEnabled || !origin) {
       gCountryArcs.style.display = "none";
       if (gCountryNodes) gCountryNodes.style.display = "none";
@@ -2018,8 +2115,9 @@
     else if (d.kind === "setCountryActive") setActiveCountryPanel(d.panelId);
     else if (d.kind === "requestBattleList") buildBattleList();
     else if (d.kind === "requestCountryList") sendCountryList();
+    else if (d.kind === "requestMuList") ensureMuList();
     else if (d.kind === "unregisterCountryPanel") unregisterCountryPanel(d.panelId);
-    else if (d.kind === "selectCountry") selectCountry(d.panelId, d.countryId || null);
+    else if (d.kind === "selectCountry") selectCountry(d.panelId, d.countryId || null, d.entityType);
     else if (d.kind === "selectCountryWindow") selectCountryWindow(d.panelId, d.window);
     else if (d.kind === "coreColors") setCoreColorsEnabled(d.enabled);
     else if (d.kind === "proxyConfig") setProxyEnabled(d.enabled);

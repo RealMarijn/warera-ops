@@ -28,8 +28,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlPanel = "1.19.2"; } catch (_) {}
-  console.log("[WDL] overlay.js panel v1.19.2 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlPanel = "1.20.1"; } catch (_) {}
+  console.log("[WDL] overlay.js panel v1.20.1 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const FLAG = (code) => `https://media.warera.io/images/flags/${code}.svg?v=16`;
@@ -948,6 +948,10 @@
     } else if (d.kind === "countryList") {
       ccCountries = d.countries || [];
       for (const inst of countryPanels.values()) inst.onCountryListUpdated();
+    } else if (d.kind === "muList") {
+      ccMus = d.mus || [];
+      ccMusLoading = !!d.loading;
+      for (const inst of countryPanels.values()) inst.onMuListUpdated();
     } else if (d.kind === "countrySummary") {
       const inst = countryPanels.get(d.panelId);
       if (inst) inst.onSummary(d);
@@ -1087,13 +1091,17 @@
   } catch (_) {}
 
   // ---- "Country damage" panels (multi-window, mirrors the tracker panels above) ----------------
-  // Pick a country and the engine draws a line to every active battle it deals damage in (see
-  // map.js "by country" mode). Any number of these windows can be open at once (the "+" button
-  // spawns another, same as the tracker panels), each independently picking its own country.
+  // Pick a country OR a military unit (see the "Country"/"MU" toggle in each window) and the engine
+  // draws a line to every active battle it deals damage in (see map.js "by country" mode — the same
+  // engine code handles both, just matching battleRanking.getRanking rows by `country` or `mu`
+  // depending on which is selected). Any number of these windows can be open at once (the "+" button
+  // spawns another, same as the tracker panels), each independently picking its own country/MU.
   // Shown/hidden by BOTH wdlEnabled (the whole tracker) and their own wdlCountryEnabled toggle.
   // Drag-links to the tracker panels (and each other) via the shared linkedSet/groupOffset/
   // layoutSideBySide/makeDraggable machinery above, through instOf().
   let ccCountries = [];      // [{cid,name,code}] — SHARED list, same data in every window
+  let ccMus = [];            // [{mid,name,countryId}] — SHARED list, lazily fetched (see requestMuList)
+  let ccMusLoading = false;  // true while map.js is still paginating mu.getManyPaginated
   let countryPanelSeq = 0;
   // Only "total" (the raw cumulative per-battle total) and "now" (since last clicked) — a rolling
   // "last hour"/"last minute" window was tried and dropped: with only a 10-30s poll cadence it's
@@ -1103,6 +1111,13 @@
     { id: "now", label: "Now" },
   ];
   const requestCountryList = () => window.postMessage({ __wdl: CHANNEL, kind: "requestCountryList" }, location.origin);
+  const requestMuList = () => window.postMessage({ __wdl: CHANNEL, kind: "requestMuList" }, location.origin);
+  // Home country's flag code for a MU, looked up against the country list already loaded above —
+  // MUs have no flag of their own, so the combo/trigger show their home country's instead.
+  const countryCodeFor = (countryId) => {
+    const c = ccCountries.find((x) => x.cid === countryId);
+    return c ? c.code : "";
+  };
 
   const CC_CSS = `
     :host { all: initial; }
@@ -1155,6 +1170,11 @@
       border:1px solid rgba(255,255,255,.14); border-radius:5px; opacity:.75; box-sizing:border-box; }
     .wins button:hover { opacity:1; }
     .wins button.active { background:rgba(255,204,68,.16); border-color:rgba(255,204,68,.5); opacity:1; color:#ffcc44; }
+    .etype { display:flex; gap:4px; margin-bottom:8px; flex:none; }
+    .etype button { all:unset; flex:1; text-align:center; cursor:pointer; font-size:10.5px; padding:3px 0;
+      border:1px solid rgba(255,255,255,.14); border-radius:5px; opacity:.75; box-sizing:border-box; }
+    .etype button:hover { opacity:1; }
+    .etype button.active { background:rgba(255,204,68,.16); border-color:rgba(255,204,68,.5); opacity:1; color:#ffcc44; }
     .sincenow[hidden] { display:none; }
     .sincenow { font-size:10px; opacity:.6; margin-top:5px; text-align:center; flex:none; }
     .timeline { margin-top:8px; flex:none; }
@@ -1189,6 +1209,10 @@
   function createCountryPanel(panelId) {
     let host, root, els;
     let selected = "";
+    let entityType = "country"; // "country" | "mu" — which shared list the combo searches/selects from
+    // Remembers this window's last pick per entityType, so toggling Country<->MU and back restores
+    // whichever one was selected before instead of clearing it every time.
+    const lastSelByType = { country: "", mu: "" };
     let comboOpen = false, activeIdx = -1, flat = [];
     let uncollapsed = false;   // collapsed by default: the target list is fully hidden, see CSS .lst/.lst.open
     let customHeight = null;  // remembered manual resize height, like the tracker panels'
@@ -1213,6 +1237,10 @@
           <button class="link" data-act="link" data-linked="1" title="Detach from group">⛓</button>
           <button class="close" data-act="close" title="Close this country damage window">✕</button></div>
         <div class="b">
+          <div class="etype">
+            <button data-etype="country" class="active" type="button" title="Track damage by country">Country</button>
+            <button data-etype="mu" type="button" title="Track damage by military unit">MU</button>
+          </div>
           <div class="combo">
             <button class="cbtn" type="button"><span class="lbl ph">Select a country…</span><span class="caret">▾</span></button>
             <div class="cpop" hidden>
@@ -1238,8 +1266,9 @@
       document.documentElement.appendChild(host);
 
       els = {
-        cp, h: cp.querySelector(".h"), cd: cp.querySelector(".cd"), linkBtn: cp.querySelector(".link"),
+        cp, h: cp.querySelector(".h"), ttl: cp.querySelector(".ttl"), cd: cp.querySelector(".cd"), linkBtn: cp.querySelector(".link"),
         closeBtn: cp.querySelector(".close"),
+        etypeBtns: cp.querySelectorAll(".etype button"),
         combo: cp.querySelector(".combo"),
         cbtn: cp.querySelector(".cbtn"), lbl: cp.querySelector(".cbtn .lbl"),
         cpop: cp.querySelector(".cpop"), csearch: cp.querySelector(".csearch"),
@@ -1267,6 +1296,9 @@
         const nowLinked = els.linkBtn.getAttribute("data-linked") !== "1";
         setLinked(panelId, nowLinked);
       });
+      for (const btn of els.etypeBtns) {
+        btn.addEventListener("click", () => setEntityType(btn.getAttribute("data-etype")));
+      }
       // Closing this window; closing the LAST one turns off the popup's "Country damage" toggle,
       // same as closing the last LIVE tracker window turns off "Damage lines".
       els.closeBtn.addEventListener("click", () => closeCountryPanel(panelId));
@@ -1329,25 +1361,37 @@
     const openCombo = () => {
       comboOpen = true; els.cpop.hidden = false; els.csearch.value = "";
       activeIdx = 0; renderList(); els.csearch.focus();
-      requestCountryList(); // always refresh on open, not just when empty — see the battle picker's openPicker
+      // always refresh on open, not just when empty — see the battle picker's openPicker
+      if (entityType === "mu") requestMuList(); else requestCountryList();
     };
     const closeCombo = () => { if (!comboOpen) return; comboOpen = false; els.cpop.hidden = true; };
 
-    const filteredCountries = () => {
+    // Unified {id,name,code}[] view over whichever shared list this window is currently browsing —
+    // `code` is always a FLAG code: the country's own for "country" mode, its home country's for
+    // "mu" mode (a MU has no flag of its own — see countryCodeFor).
+    const currentItems = () => entityType === "mu"
+      ? ccMus.map((m) => ({ id: m.mid, name: m.name, code: countryCodeFor(m.countryId) }))
+      : ccCountries.map((c) => ({ id: c.cid, name: c.name, code: c.code }));
+
+    const filteredItems = () => {
       const q = els.csearch.value.trim().toLowerCase();
-      return q ? ccCountries.filter((c) => (c.name || "").toLowerCase().includes(q)) : ccCountries;
+      const items = currentItems();
+      return q ? items.filter((c) => (c.name || "").toLowerCase().includes(q)) : items;
     };
 
     const renderList = () => {
-      const items = filteredCountries();
+      const items = filteredItems();
       flat = [""]; // index 0 = the clear/none row
       let html = `<div class="cclear" data-id=""><span class="fl"></span><span class="nm" style="opacity:.7">None (clear)</span></div>`;
       for (const c of items) {
         const idx = flat.length;
-        flat.push(c.cid);
-        html += `<div class="copt" data-id="${esc(c.cid)}" data-idx="${idx}" title="${esc(c.name || "")}">${flagImg(c)}<span class="nm">${esc(c.name || "?")}</span></div>`;
+        flat.push(c.id);
+        html += `<div class="copt" data-id="${esc(c.id)}" data-idx="${idx}" title="${esc(c.name || "")}">${flagImg(c)}<span class="nm">${esc(c.name || "?")}</span></div>`;
       }
-      if (!items.length) html += `<div class="cnone">No matching countries.</div>`;
+      if (!items.length) {
+        const noneMsg = entityType === "mu" && ccMusLoading ? "Loading military units…" : `No matching ${entityType === "mu" ? "military units" : "countries"}.`;
+        html += `<div class="cnone">${esc(noneMsg)}</div>`;
+      }
       els.clist.innerHTML = html;
       highlight();
     };
@@ -1368,11 +1412,14 @@
       else if (e.key === "Escape") { closeCombo(); }
     };
 
+    const placeholderText = () => `Select a ${entityType === "mu" ? "military unit" : "country"}…`;
+    const emptyHintText = () => `Pick a ${entityType === "mu" ? "military unit" : "country"} to see where it deals damage.`;
+
     const renderTrigger = () => {
-      const c = ccCountries.find((x) => x.cid === selected);
+      const c = currentItems().find((x) => x.id === selected);
       if (selected && c) { els.lbl.className = "lbl"; els.lbl.innerHTML = `${flagImg(c)}<span class="nm">${esc(c.name || "?")}</span>`; }
-      else if (selected) { els.lbl.className = "lbl"; els.lbl.textContent = "Selected country"; }
-      else { els.lbl.className = "lbl ph"; els.lbl.textContent = "Select a country…"; }
+      else if (selected) { els.lbl.className = "lbl"; els.lbl.textContent = entityType === "mu" ? "Selected MU" : "Selected country"; }
+      else { els.lbl.className = "lbl ph"; els.lbl.textContent = placeholderText(); }
     };
 
     const setEmpty = (msg) => {
@@ -1392,8 +1439,9 @@
       els.sinceNow.title = d.toLocaleString();
     };
 
-    const choose = (cid) => {
-      selected = cid || "";
+    const choose = (id) => {
+      selected = id || "";
+      lastSelByType[entityType] = selected; // remembered so switching entityType away and back restores it
       renderTrigger();
       closeCombo();
       nextUpdateAt = 0;
@@ -1401,8 +1449,22 @@
       // map.js) — a stale click time from a previous country wouldn't mean anything here anymore.
       nowClickedAt = 0;
       renderSinceNow();
-      window.postMessage({ __wdl: CHANNEL, kind: "selectCountry", panelId, countryId: selected || null }, location.origin);
-      setEmpty(selected ? "Loading…" : "Pick a country to see where it deals damage.");
+      window.postMessage({ __wdl: CHANNEL, kind: "selectCountry", panelId, countryId: selected || null, entityType }, location.origin);
+      setEmpty(selected ? "Loading…" : emptyHintText());
+    };
+
+    // Switches what this window's combo searches/selects from. Restores whichever pick this window
+    // last had for that type (lastSelByType — "" the first time a type is visited), rather than
+    // always clearing, so toggling Country<->MU and back doesn't lose the other side's selection.
+    const setEntityType = (type) => {
+      if (type !== "country" && type !== "mu") return;
+      if (type === entityType) return;
+      entityType = type;
+      for (const b of els.etypeBtns) b.classList.toggle("active", b.getAttribute("data-etype") === type);
+      els.ttl.textContent = type === "mu" ? "MU damage" : "Country damage";
+      els.csearch.placeholder = type === "mu" ? "Search military units…" : "Search countries…";
+      choose(lastSelByType[type]); // restores (or clears, if never picked) + notifies the engine
+      if (comboOpen) { if (type === "mu") requestMuList(); else requestCountryList(); renderList(); }
     };
 
     const chooseWindow = (win) => {
@@ -1426,12 +1488,17 @@
       renderTrigger();
       renderSinceNow();
       closeCombo();
-      setEmpty("Pick a country to see where it deals damage.");
-      window.postMessage({ __wdl: CHANNEL, kind: "selectCountry", panelId, countryId: null }, location.origin);
+      setEmpty(emptyHintText());
+      window.postMessage({ __wdl: CHANNEL, kind: "selectCountry", panelId, countryId: null, entityType }, location.origin);
     };
 
     const onCountryListUpdated = () => {
       renderTrigger();               // the selected country's flag/name may only now be resolvable
+      if (comboOpen) renderList();
+    };
+
+    const onMuListUpdated = () => {
+      renderTrigger();               // the selected MU's flag/name may only now be resolvable
       if (comboOpen) renderList();
     };
 
@@ -1453,13 +1520,15 @@
     // here, never the elements themselves, so els.lst stays a valid reference for the collapse/
     // resize CSS-class toggling in setUncollapsed/makeHeightResizable.
     const onSummary = (d) => {
-      if (d.countryId !== selected) return; // ignore stale / other-selection updates
+      // ignore stale updates: a different selection in this window, OR (belt-and-suspenders) a
+      // response for the other entityType that happens to share an id string with the current one.
+      if (d.countryId !== selected || (d.entityType || "country") !== entityType) return;
       nextUpdateAt = d.nextUpdateAt || 0;
       renderTimeline(d.history, d.startedAt);
-      if (!selected) { setEmpty("Pick a country to see where it deals damage."); return; }
+      if (!selected) { setEmpty(emptyHintText()); return; }
       const targets = d.targets || [];
       if (!targets.length) {
-        setEmpty(`No damage from ${d.name || "this country"} in the selected window right now.`);
+        setEmpty(`No damage from ${d.name || "this"} in the selected window right now.`);
         return;
       }
       els.emptyEl.hidden = true;
@@ -1510,7 +1579,7 @@
     return {
       panelId,
       get panelEl() { return els.cp; },
-      onSummary, onCountryListUpdated,
+      onSummary, onCountryListUpdated, onMuListUpdated,
       getRect, getPos, setPos, clamp, setActive, bringToFront, setLinkButton,
       setHostVisible, clearSelection, destroy,
       choose,
@@ -1648,6 +1717,9 @@
     setTimeout(() => {
       if (enabled && !battleItems.length) requestBattleList();
       if (countryFeatureEnabled && !ccCountries.length) requestCountryList();
+      // MU mode's own list is heavier (~14 paginated requests) — start it in the background here too,
+      // so switching a window to "MU" later doesn't have to wait on it from a cold start.
+      if (countryFeatureEnabled && !ccMus.length) requestMuList();
     }, 4000);
   };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
