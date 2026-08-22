@@ -17,20 +17,32 @@
     muBounty: `<circle cx="12" cy="12" r="9"></circle><circle cx="12" cy="12" r="5"></circle><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"></circle>`,
     // Same coin-stack glyph WarEra's own muWealth tile uses.
     investedMoney: `<path d="M12 5C7.031 5 2 6.546 2 9.5S7.031 14 12 14c4.97 0 10-1.546 10-4.5S16.97 5 12 5zm-5 9.938v3c1.237.299 2.605.482 4 .541v-3a21.166 21.166 0 0 1-4-.541zm6 .54v3a20.994 20.994 0 0 0 4-.541v-3a20.994 20.994 0 0 1-4 .541zm6-1.181v3c1.801-.755 3-1.857 3-3.297v-3c0 1.44-1.199 2.542-3 3.297zm-14 3v-3C3.2 13.542 2 12.439 2 11v3c0 1.439 1.2 2.542 3 3.297z" fill="currentColor" stroke="none"></path>`,
+    // WarEra's own pill (buff active) and pill-off (post-pill penalty) glyphs — filled, currentColor.
+    inBuff: `<path d="M4.22,11.29L11.29,4.22C13.64,1.88 17.43,1.88 19.78,4.22C22.12,6.56 22.12,10.36 19.78,12.71L12.71,19.78C10.36,22.12 6.56,22.12 4.22,19.78C1.88,17.43 1.88,13.64 4.22,11.29M5.64,12.71C4.59,13.75 4.24,15.24 4.6,16.57L10.59,10.59L14.83,14.83L18.36,11.29C19.93,9.73 19.93,7.2 18.36,5.64C16.8,4.07 14.27,4.07 12.71,5.64L5.64,12.71Z" fill="currentColor" stroke="none"></path>`,
+    inDebuff: `<path d="M22.11 21.46L2.39 1.73L1.11 3L6.81 8.7L4.22 11.29C1.88 13.64 1.88 17.43 4.22 19.78C6.56 22.12 10.36 22.12 12.71 19.78L15.3 17.19L20.84 22.73L22.11 21.46M4.6 16.57C4.24 15.24 4.59 13.75 5.64 12.71L8.23 10.12L9.64 11.53L4.6 16.57M10.78 7.58L9.36 6.16L11.29 4.22C13.64 1.88 17.43 1.88 19.78 4.22C22.12 6.56 22.12 10.36 19.78 12.71L17.85 14.65L16.43 13.23L18.36 11.29C19.93 9.73 19.93 7.2 18.36 5.64C16.8 4.07 14.27 4.07 12.71 5.64L10.78 7.58Z" fill="currentColor" stroke="none"></path>`,
   };
   const DEFAULT_ICON = `<circle cx="12" cy="12" r="9"></circle><path d="M12 7v6l4 2"></path>`;
 
   const LABELS = {
     muBounty: "Bounty",
     investedMoney: "Invested Money",
+    inBuff: "In buff",
+    inDebuff: "In debuff",
   };
 
-  // investedMoney isn't a real leaderboard category — clicking it shouldn't navigate.
-  const NON_NAVIGABLE_KEYS = new Set(["investedMoney"]);
+  // Computed tiles that aren't real leaderboard categories — clicking shouldn't navigate.
+  const NON_NAVIGABLE_KEYS = new Set(["investedMoney", "inBuff", "inDebuff"]);
 
   // Tiles with no rank/tier of their own instead borrow the color of whichever real,
   // currently-visible tile is named here.
   const COLOR_SOURCE_KEY = { investedMoney: "muWealth" };
+
+  // The buff/debuff tiles get an explicit WarEra green/red instead of borrowing a tier — colours
+  // read straight off the game's own tier tiles (green tile) and its buff/debuff pill glyphs (red).
+  const TILE_COLORS = {
+    inBuff: { label: "#65C388", value: "#81CE9D", bg: "linear-gradient(45deg, rgb(13,34,21), rgba(0,0,0,0))" },
+    inDebuff: { label: "#C85A5C", value: "#D87072", bg: "linear-gradient(45deg, rgb(40,13,13), rgba(0,0,0,0))" },
+  };
 
   function sumInvestedMoney(payload) {
     const map = payload?.investedMoneyByUsers;
@@ -39,13 +51,21 @@
   }
 
   // Extra stats computed from top-level payload fields rather than `rankings.*` (no rank/tier data).
-  const EXTRA_TILES = [{ key: "investedMoney", getValue: () => sumInvestedMoney(state.payload) }];
+  // The buff/debuff counts come from an async member scan (see scanMemberBuffs) — their getValue
+  // stays `undefined` until that finishes, so those tiles simply don't appear until the count is real.
+  const EXTRA_TILES = [
+    { key: "investedMoney", getValue: () => sumInvestedMoney(state.payload) },
+    { key: "inBuff", getValue: () => state.memberBuff },
+    { key: "inDebuff", getValue: () => state.memberDebuff },
+  ];
 
   const state = {
     muId: null,
     rankings: undefined, // undefined = not fetched yet, null = fetched but absent/failed, object once loaded
     payload: null,
     fetching: false,
+    memberBuff: undefined,   // # members with an active attack buff (pill), undefined until scanned
+    memberDebuff: undefined, // # members in the post-pill debuff window
   };
 
   let active = false;
@@ -160,6 +180,17 @@
         swapVariant(valueSpan, palette.valueBase, tierInfo.value);
       }
 
+      // Fixed WarEra green/red for the buff/debuff tiles — inline styles win over the cloned
+      // tile's tier classes (background gradient + label/value/icon colour).
+      const colors = TILE_COLORS[key];
+      if (colors) {
+        tile.style.background = colors.bg;
+        labelSpan.style.color = colors.label;
+        valueSpan.style.color = colors.value;
+        numberSpan.style.color = colors.value;
+        iconDiv.style.color = colors.value;
+      }
+
       const badgeOuter = tile.children[1];
       const badgeInner = badgeOuter?.querySelector('[class*="chnava"]');
       const badgeNumber = badgeInner?.querySelector("span");
@@ -192,6 +223,36 @@
     return tile;
   }
 
+  // Buff/debuff come from each member's own user record (mu.getById only lists member ids), so this
+  // scans every member once per mu. A pill puts a member in "buff" (skills.attack.buffsPercent > 0)
+  // for 8h, then "debuff" (debuffsPercent > 0) for 15h. ~1s for 25 members; results cached per mu.
+  async function scanMemberBuffs(muId, members) {
+    if (!Array.isArray(members) || members.length === 0) {
+      if (state.muId === muId) { state.memberBuff = 0; state.memberDebuff = 0; scheduleInject(); }
+      return;
+    }
+    let buff = 0, debuff = 0;
+    for (const userId of members) {
+      if (state.muId !== muId) return; // navigated to another mu mid-scan — abandon stale work
+      try {
+        const raw = await browser.runtime.sendMessage({
+          type: "WARERA_OPS_FETCH",
+          endpoint: "user.getUserLite",
+          params: { userId },
+        });
+        const attack = (raw?.result?.data ?? raw)?.skills?.attack;
+        if (attack) {
+          if (attack.buffsPercent > 0) buff++;
+          if (attack.debuffsPercent > 0) debuff++;
+        }
+      } catch (_) { /* skip a member we couldn't load rather than dropping the whole count */ }
+    }
+    if (state.muId !== muId) return;
+    state.memberBuff = buff;
+    state.memberDebuff = debuff;
+    scheduleInject();
+  }
+
   async function ensureRankingsFetched(muId) {
     if (state.muId === muId && state.rankings !== undefined) return;
     if (state.fetching) return;
@@ -199,6 +260,8 @@
     state.muId = muId;
     state.rankings = undefined;
     state.payload = null;
+    state.memberBuff = undefined;
+    state.memberDebuff = undefined;
 
     // WarEra's client-side router swaps the grid's real tiles but leaves our injected ones
     // alone (React doesn't know about them) — clear them now so stale numbers from the
@@ -214,6 +277,7 @@
       const payload = raw?.result?.data ?? raw;
       state.payload = payload ?? null;
       state.rankings = payload?.rankings ?? null;
+      scanMemberBuffs(muId, payload?.members || []); // fire-and-forget; fills the buff/debuff tiles when done
     } catch (err) {
       console.error("[WarEra Ops] failed to fetch mu data", err);
       state.rankings = null;
@@ -287,6 +351,8 @@
     state.rankings = undefined;
     state.payload = null;
     state.fetching = false;
+    state.memberBuff = undefined;
+    state.memberDebuff = undefined;
 
     // WarEra re-renders this grid client-side (route changes, live data refreshes),
     // which can wipe our injected nodes since React doesn't know about them — watch and re-add.
@@ -300,6 +366,8 @@
         state.muId = null;
         state.rankings = undefined;
         state.payload = null;
+        state.memberBuff = undefined;
+        state.memberDebuff = undefined;
         scheduleInject();
       }
     }, 800);
@@ -322,6 +390,8 @@
     state.rankings = undefined;
     state.payload = null;
     state.fetching = false;
+    state.memberBuff = undefined;
+    state.memberDebuff = undefined;
   }
 
   window.WarEraOps.registerFeature({ name: "muRankings", activate, deactivate });
