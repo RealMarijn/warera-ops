@@ -27,6 +27,8 @@
   let scheduled = false;
   let fetching = false;
   let data = null; // { attacker: {...}, defender: {...} } for lastBattleId, or null (not loaded/failed)
+  let countryCodeByName = null; // { lowercased country name -> code } — for the named-country flags
+  let countryCodesLoading = false;
   let featureEnabled = true; // popup key "battleBonusEnabled" (default on)
   let storageListener = null;
 
@@ -46,6 +48,7 @@
     fetching = true;
     lastBattleId = battleId;
     data = null;
+    ensureCountryCodes(); // fire-and-forget so named-country flags are ready by hover time
     document.querySelectorAll(`[${MARKER_ATTR}]`).forEach((el) => el.remove());
     hideTooltip();
     try {
@@ -83,9 +86,9 @@
     tooltipEl.id = TOOLTIP_ID;
     Object.assign(tooltipEl.style, {
       position: "fixed", zIndex: "2147483647", pointerEvents: "none",
-      background: "rgba(20,23,30,0.92)", border: "1px solid rgba(255,255,255,0.14)",
-      borderRadius: "10px", padding: "8px 10px", boxShadow: "0 10px 30px rgba(0,0,0,0.5)",
-      backdropFilter: "blur(14px) saturate(150%)", WebkitBackdropFilter: "blur(14px) saturate(150%)",
+      background: "rgba(17,20,27,0.94)", border: "1px solid rgba(255,255,255,0.12)",
+      borderRadius: "12px", padding: "13px 15px 12px", boxShadow: "0 16px 40px rgba(0,0,0,0.55)",
+      backdropFilter: "blur(16px) saturate(150%)", WebkitBackdropFilter: "blur(16px) saturate(150%)",
       font: `600 11px ${WARERA_FONT}`,
       color: "#eef0f4", display: "none",
       // A tall table flipped above a low-on-screen anchor could still push its own top past y=0
@@ -104,38 +107,177 @@
   // named countries" — only once, not again when the list returns to "Other" afterward.
   const STANDARD_GROUPS = new Set(["Own citizens", "Allies", "Pact countries", "Other"]);
 
+  // A cell with no real contribution ("-", "N/A", empty, a plain zero) is dimmed hard so the eye
+  // lands on the values that actually matter instead of a wall of dashes.
+  const isEmptyCell = (v) => {
+    const s = String(v == null ? "" : v).trim();
+    return s === "" || s === "-" || s === "–" || s === "N/A" || s === "0" || s === "0%";
+  };
+
+  // ---- flags + category colours ---------------------------------------------------------------
+  // The backend only names the country (e.g. "Philippines") — resolve its flag code from the game's
+  // own country list (public endpoint), matched by name. Fetched once, cached; retried if it fails.
+  const FLAG = (code) => `https://media.warera.io/images/flags/${code}.svg?v=16`;
+  async function ensureCountryCodes() {
+    if (countryCodeByName || countryCodesLoading) return;
+    countryCodesLoading = true;
+    try {
+      const raw = await browser.runtime.sendMessage({
+        type: "WARERA_OPS_FETCH", endpoint: "country.getAllCountries", params: {},
+      });
+      const list = raw?.result?.data ?? raw;
+      const arr = Array.isArray(list) ? list : Object.values(list || {});
+      const map = {};
+      for (const c of arr) if (c && c.name && c.code) map[String(c.name).toLowerCase()] = c.code;
+      countryCodeByName = map;
+    } catch (_) {
+      // leave it null so the next ensureFetched() retries — flags just don't show meanwhile
+    } finally {
+      countryCodesLoading = false;
+    }
+  }
+  const flagFor = (name) => {
+    const code = countryCodeByName && countryCodeByName[String(name).toLowerCase()];
+    return code ? `<img class="wob-flag" src="${esc(FLAG(code))}" alt="">` : "";
+  };
+
+  // A colour per standard group; the same colours reappear as small dots behind the named
+  // countries (ally / pact / order) so you can read a country's relationships at a glance.
+  const GROUP_COLOR = {
+    "Own citizens": "#6ea8ff", "Allies": "#7ee0a0", "Pact countries": "#c79bff", "Other": "#8a929e",
+  };
+  const ORDER_COLOR = "#f0c968";
+  const dot = (color) => `<i class="wob-dot" style="background:${color}"></i>`;
+
+  function relationshipTags(r) {
+    const dots = [];
+    if (!isEmptyCell(r.alliance)) dots.push(GROUP_COLOR["Allies"]);
+    if (!isEmptyCell(r.pact)) dots.push(GROUP_COLOR["Pact countries"]);
+    if (!isEmptyCell(r.order)) dots.push(ORDER_COLOR);
+    return dots.length ? `<span class="wob-tags">${dots.map(dot).join("")}</span>` : "";
+  }
+
+  // Label cell: standard groups get a colour dot; named countries get a flag + relationship dots.
+  function labelCellHTML(r, isNamed) {
+    if (isNamed) {
+      return `<span class="wob-lbl">${flagFor(r.group)}<span class="wob-nm">${esc(r.group)}</span>${relationshipTags(r)}</span>`;
+    }
+    const color = GROUP_COLOR[r.group];
+    return `<span class="wob-lbl">${color ? dot(color) : ""}<span class="wob-nm">${esc(r.group)}</span></span>`;
+  }
+
   function buildTooltipHTML(sideData) {
     const cols = ["Home", "Enemy", "Pact", "Ally.", "Order", "MU-ord*", "MU-HQ*", sideData.upgrade_label + "**", "Revolt", "~Max"];
     const keys = ["home", "enemy", "pact", "alliance", "order", "mu_order", "mu_hq", "upgrade", "revolt"];
-    let dividerAdded = false;
+    const totalCols = cols.length + 1; // + the group/label column
+    let sectionAdded = false;
     const rows = (sideData.rows || []).map((r) => {
-      const isNamedCountry = !STANDARD_GROUPS.has(r.group);
-      const divider = isNamedCountry && !dividerAdded;
-      if (divider) dividerAdded = true;
-      const cells = keys.map((k) => `<td>${esc(r[k])}</td>`).join("");
-      return `<tr${divider ? ' class="wob-divider"' : ""}><td class="wob-grp">${esc(r.group)}</td>${cells}<td class="wob-max">~${esc(r.max_est)}%</td></tr>`;
+      const isNamed = !STANDARD_GROUPS.has(r.group);
+      const isOther = r.group === "Other";
+      // A labelled section header the first time we cross from the shared groups into the
+      // specific named countries — a clear break, not just a hairline.
+      let pre = "";
+      if (isNamed && !sectionAdded) {
+        sectionAdded = true;
+        pre = `<tr class="wob-section"><td colspan="${totalCols}">Countries with an order</td></tr>`;
+      }
+      const cells = keys.map((k) =>
+        `<td${isEmptyCell(r[k]) ? ' class="wob-dim"' : ""}>${esc(r[k])}</td>`).join("");
+      const trCls = [isNamed ? "wob-named" : "", isOther ? "wob-other" : ""].filter(Boolean).join(" ");
+      return `${pre}<tr${trCls ? ` class="${trCls}"` : ""}><td class="wob-grp">${labelCellHTML(r, isNamed)}</td>${cells}<td class="wob-max">~${esc(r.max_est)}%</td></tr>`;
     }).join("");
+    const head = cols.map((c, i) =>
+      `<th${i === cols.length - 1 ? ' class="wob-max-h"' : ""}>${esc(c)}</th>`).join("");
     return `
-      <div class="wob-ttl">${esc(sideData.country_name)} — full breakdown</div>
+      <div class="wob-ttl"><b>${esc(sideData.country_name)}</b> · full breakdown</div>
       <table class="wob-table">
-        <thead><tr><th></th>${cols.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead>
+        <thead><tr><th></th>${head}</tr></thead>
         <tbody>${rows}</tbody>
       </table>
-      <div class="wob-note">*not everyone — depends on MU orders/HQ. **must be active.</div>
+      <div class="wob-legend">
+        <span>${dot(GROUP_COLOR["Own citizens"])}Own</span>
+        <span>${dot(GROUP_COLOR["Allies"])}Ally</span>
+        <span>${dot(GROUP_COLOR["Pact countries"])}Pact</span>
+        <span>${dot(ORDER_COLOR)}Order</span>
+      </div>
+      <div class="wob-note"><b>*</b> depends on MU orders / HQ.&nbsp;&nbsp;<b>**</b> must be active.</div>
     `;
   }
 
   const TOOLTIP_CSS = `
-    #${TOOLTIP_ID} .wob-ttl { font-weight: 600; margin-bottom: 6px; opacity: 0.85; }
-    #${TOOLTIP_ID} table.wob-table { border-collapse: collapse; white-space: nowrap; }
-    #${TOOLTIP_ID} table.wob-table th, #${TOOLTIP_ID} table.wob-table td {
-      padding: 2px 6px; text-align: right; font-variant-numeric: tabular-nums;
+    #${TOOLTIP_ID} .wob-ttl {
+      font-weight: 700; font-size: 12.5px; letter-spacing: .2px; color: #cfd4dc;
+      margin: 0 1px 9px; padding-bottom: 8px; border-bottom: 1px solid rgba(255,255,255,0.09);
     }
-    #${TOOLTIP_ID} table.wob-table th { color: rgba(238,240,244,0.55); font-weight: 600; }
-    #${TOOLTIP_ID} table.wob-table td.wob-grp, #${TOOLTIP_ID} table.wob-table th:first-child { text-align: left; }
-    #${TOOLTIP_ID} table.wob-table td.wob-max { font-weight: 600; color: #e7b9a5; }
-    #${TOOLTIP_ID} table.wob-table tr.wob-divider td { border-top: 1px solid rgba(255,255,255,0.18); padding-top: 5px; }
-    #${TOOLTIP_ID} .wob-note { margin-top: 6px; font-size: 9.5px; opacity: 0.5; white-space: normal; max-width: 340px; }
+    #${TOOLTIP_ID} .wob-ttl b { color: #f0c9b6; font-weight: 700; }
+
+    #${TOOLTIP_ID} table.wob-table { border-collapse: collapse; white-space: nowrap; }
+
+    /* header row: quiet, spaced-out, uppercase labels */
+    #${TOOLTIP_ID} table.wob-table thead th {
+      padding: 2px 9px 8px; text-align: right; font-weight: 600;
+      font-size: 9px; letter-spacing: .5px; text-transform: uppercase;
+      color: rgba(238,240,244,0.42);
+    }
+    #${TOOLTIP_ID} table.wob-table thead th:first-child { text-align: left; }
+
+    /* body cells: more vertical air + zebra for tracking across the wide row */
+    #${TOOLTIP_ID} table.wob-table tbody td {
+      padding: 5px 9px; text-align: right; font-variant-numeric: tabular-nums;
+      font-size: 11px; color: #d7dbe2;
+    }
+    #${TOOLTIP_ID} table.wob-table tbody tr:nth-child(even) td { background: rgba(255,255,255,0.028); }
+
+    /* group / country label column */
+    #${TOOLTIP_ID} table.wob-table td.wob-grp {
+      text-align: left; font-weight: 700; color: #eef0f4; padding-right: 18px;
+    }
+    /* named-country detail rows read quieter than the three summary groups */
+    #${TOOLTIP_ID} table.wob-table tr.wob-named td.wob-grp { font-weight: 500; color: rgba(238,240,244,0.72); }
+
+    /* label = colour dot / flag + name (+ relationship dots for countries) */
+    #${TOOLTIP_ID} .wob-lbl { display: inline-flex; align-items: center; gap: 7px; }
+    #${TOOLTIP_ID} .wob-nm { overflow: hidden; text-overflow: ellipsis; }
+    #${TOOLTIP_ID} .wob-flag {
+      width: 18px; height: 13px; object-fit: cover; border-radius: 2px; flex: none;
+      box-shadow: 0 0 0 1px rgba(0,0,0,0.4);
+    }
+    #${TOOLTIP_ID} .wob-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; display: inline-block; }
+    #${TOOLTIP_ID} .wob-tags { display: inline-flex; align-items: center; gap: 3px; margin-left: 4px; }
+
+    /* labelled break between the shared groups and the per-country rows */
+    #${TOOLTIP_ID} table.wob-table tr.wob-section td {
+      text-align: left; padding: 10px 9px 4px;
+      font-size: 8.5px; letter-spacing: .7px; text-transform: uppercase; font-weight: 700;
+      color: rgba(238,240,244,0.4); border-top: 1px solid rgba(255,255,255,0.14);
+    }
+    /* the trailing "Other" catch-all gets its own separation */
+    #${TOOLTIP_ID} table.wob-table tr.wob-other td { border-top: 1px solid rgba(255,255,255,0.10); }
+
+    /* empty / N-A cells recede so the real numbers pop */
+    #${TOOLTIP_ID} table.wob-table td.wob-dim { color: rgba(238,240,244,0.20); }
+
+    /* the ~Max result column — the takeaway, set off from the rest */
+    #${TOOLTIP_ID} table.wob-table th.wob-max-h { color: rgba(240,201,182,0.65); }
+    #${TOOLTIP_ID} table.wob-table th.wob-max-h,
+    #${TOOLTIP_ID} table.wob-table td.wob-max { border-left: 1px solid rgba(255,255,255,0.10); padding-left: 13px; }
+    #${TOOLTIP_ID} table.wob-table td.wob-max { font-weight: 700; font-size: 11.5px; color: #f0c9b6; }
+
+    /* section break above the per-country rows */
+    #${TOOLTIP_ID} table.wob-table tr.wob-divider td { border-top: 1px solid rgba(255,255,255,0.14); padding-top: 8px; }
+
+    #${TOOLTIP_ID} .wob-legend {
+      display: flex; flex-wrap: wrap; gap: 12px; margin: 11px 1px 0;
+      padding-top: 9px; border-top: 1px solid rgba(255,255,255,0.07);
+      font-size: 10px; color: rgba(238,240,244,0.55);
+    }
+    #${TOOLTIP_ID} .wob-legend span { display: inline-flex; align-items: center; gap: 5px; }
+
+    #${TOOLTIP_ID} .wob-note {
+      margin: 7px 1px 0; font-size: 9.5px; line-height: 1.5;
+      color: rgba(238,240,244,0.4); white-space: normal; max-width: 360px;
+    }
+    #${TOOLTIP_ID} .wob-note b { color: rgba(238,240,244,0.6); font-weight: 700; }
   `;
   let cssInjected = false;
   function ensureCSS() {
@@ -204,12 +346,16 @@
   // already present without re-inserting a duplicate on every re-render. The ⓘ glyph plus the
   // pill background above are both there for the same reason: make "hover this for info" obvious
   // at a glance, not just implied by a subtle color/underline.
-  function buildTriggerText(label, marker, html) {
+  function buildTriggerText(label, marker) {
     ensureTriggerCSS();
     const el = document.createElement("span");
     el.setAttribute(MARKER_ATTR, marker);
     el.innerHTML = `<span class="wob-info">ⓘ</span>${esc(label)}`;
-    el.addEventListener("mouseenter", () => showTooltip(el, html));
+    // Built on hover, not up front, so late-arriving flags (country codes fetched async) and any
+    // refreshed data show up without having to re-create the trigger. `marker` is the side key.
+    el.addEventListener("mouseenter", () => {
+      if (data && data[marker]) showTooltip(el, buildTooltipHTML(data[marker]));
+    });
     el.addEventListener("mouseleave", hideTooltip);
     return el;
   }
@@ -254,7 +400,7 @@
       if (!container) continue;
       let trigger = document.querySelector(`[${MARKER_ATTR}="${side}"]`);
       if (!trigger) {
-        trigger = buildTriggerText("Bonuses", side, buildTooltipHTML(data[side]));
+        trigger = buildTriggerText("Bonuses", side);
         // Appended, not inserted at a specific flex position — position:absolute takes it out of
         // that row's flow entirely, so where it sits in the DOM no longer matters for layout.
         container.appendChild(trigger);
