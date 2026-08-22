@@ -51,13 +51,20 @@
   }
 
   // Extra stats computed from top-level payload fields rather than `rankings.*` (no rank/tier data).
-  // The buff/debuff counts come from an async member scan (see scanMemberBuffs) — their getValue
-  // stays `undefined` until that finishes, so those tiles simply don't appear until the count is real.
+  // `loading: true` tiles show up the moment the grid renders — with a "Loading…" placeholder —
+  // and get filled in once their async member scan (see scanMemberBuffs) lands. Plain extras
+  // (investedMoney) still only appear once their value is actually computable.
   const EXTRA_TILES = [
     { key: "investedMoney", getValue: () => sumInvestedMoney(state.payload) },
-    { key: "inBuff", getValue: () => state.memberBuff },
-    { key: "inDebuff", getValue: () => state.memberDebuff },
+    { key: "inBuff", loading: true, getValue: () => state.memberBuff },
+    { key: "inDebuff", loading: true, getValue: () => state.memberDebuff },
   ];
+
+  // Value + placeholder for an extra tile: a loading tile with no count yet shows "Loading…".
+  function extraDisplay(extra) {
+    const value = extra.getValue();
+    return { value, displayText: extra.loading && value === undefined ? "Loading…" : null };
+  }
 
   const state = {
     muId: null,
@@ -164,7 +171,7 @@
       const numberSpan = valueSpan.children[1];
 
       labelSpan.textContent = LABELS[key] || key;
-      numberSpan.textContent = formatNumber(stat?.value ?? null);
+      numberSpan.textContent = stat?.displayText != null ? stat.displayText : formatNumber(stat?.value ?? null);
       iconDiv.innerHTML = `
         <svg viewBox="0 0 24 24" style="width:1em;height:1em;font-size:120%;filter:drop-shadow(black 1px 1px 0px);" fill="none" stroke="currentColor" stroke-width="2">
           ${ICONS[key] || DEFAULT_ICON}
@@ -317,9 +324,24 @@
     const missingRankingKeys = Object.keys(state.rankings).filter(
       (key) => ALLOWED_RANKING_KEYS.has(key) && !existingKeys.has(key)
     );
+    // Loading tiles (buff/debuff) show immediately; plain extras only once computable.
     const missingExtraKeys = EXTRA_TILES.filter(
-      (extra) => extra.getValue() !== undefined && !existingKeys.has(extra.key)
+      (extra) => !existingKeys.has(extra.key) && (extra.loading || extra.getValue() !== undefined)
     ).map((extra) => extra.key);
+
+    // Keep already-injected loading tiles in sync as their scan finishes ("Loading…" -> count).
+    // This has to run even when nothing is "missing", so it sits before the early-out below.
+    for (const extra of EXTRA_TILES) {
+      if (!extra.loading || !existingKeys.has(extra.key)) continue;
+      const tile = grid.querySelector(`[${MARKER_ATTR}="${extra.key}"]`);
+      const numberSpan = tile && tile.children[0] && tile.children[0].children[1] &&
+        tile.children[0].children[1].children[0] && tile.children[0].children[1].children[0].children[1];
+      if (numberSpan) {
+        const { value, displayText } = extraDisplay(extra);
+        numberSpan.textContent = displayText != null ? displayText : formatNumber(value ?? null);
+      }
+    }
+
     if (missingRankingKeys.length === 0 && missingExtraKeys.length === 0) return;
 
     const reference =
@@ -332,7 +354,7 @@
     }
     for (const key of missingExtraKeys) {
       const extra = EXTRA_TILES.find((e) => e.key === key);
-      grid.appendChild(buildTile(reference, key, { value: extra.getValue() }, palette));
+      grid.appendChild(buildTile(reference, key, extraDisplay(extra), palette));
     }
   }
 
