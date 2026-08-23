@@ -37,8 +37,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlEngine = "0.39.2"; } catch (_) {}
-  console.log("[WDL] map.js engine v0.39.2 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlEngine = "0.42.2"; } catch (_) {}
+  console.log("[WDL] map.js engine v0.42.2 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const NS = "http://www.w3.org/2000/svg";
@@ -53,6 +53,11 @@
   let regionMeta = {};  // regionId  -> { name }
   let countryPos = {};  // countryId -> [lng,lat] (homeland centroid, largest core-territory cluster only)
   let countryMeta = {}; // countryId -> { code, name }
+  // countryId (CURRENT owner, region.countryId — not initialCountryId) -> [[lng,lat], ...] of every
+  // region it currently holds. Used by the war-priority overlay to anchor an arrow at whichever of a
+  // country's OWN regions is actually closest to the other side, instead of the country's overall
+  // centroid — a country spanning a big area would otherwise draw a needlessly long/misleading line.
+  let currentRegionsByCountry = {};
   let countryRegionCount = {};   // countryId -> number of core regions (all of them, not just the main cluster)
   let countryRankByRegionCount = []; // countryIds sorted by countryRegionCount, descending
   let countryRankIndex = new Map();  // countryId -> its index in countryRankByRegionCount (0 = biggest)
@@ -109,6 +114,25 @@
   // check and backend polling (this MAIN-world script has no chrome.* access).
   let proxyEnabled = false;
   let proxyData = {}; // countryId -> { o: originCountryId, r: rate }, PROXY countries only (BACKEND_API.md's short field names, straight from the wire)
+
+  // ---- war-priority overlay -----------------------------------------------
+  // Winning a battle in a war grants that country 24h "priority" over the other side (only the
+  // priority holder can start the next battle in that war). Not whitelisted/backend-involved at
+  // all — war.getPaginatedWars is a plain WarEra API call, same trust level as battle.getById.
+  // No global "all wars" endpoint exists though: it's scoped to one countryId per call, so this
+  // scans every country's own war list (like buildActiveBattleIndex does for battles) — see
+  // scanAllWarPriorities. Client-side only, driven entirely by warPriorityEnabled below (relayed
+  // from overlay.js's popup toggle, same "config" message pattern as coreColorsEnabled).
+  const WAR_PRIORITY_COLOR = "#c25f35"; // WarEra's own accent for a priority-holder's flag ring (confirmed live)
+  const WAR_PRIORITY_POLL_MS = 10 * 60 * 1000; // matches base/bunker/proxy cadence — a ~200-country fan-out isn't cheap
+  const WAR_CONCURRENCY = 8;
+  let warPriorityEnabled = false;
+  let warPriorityTimer = null;
+  let warPriorityScanInFlight = false;
+  // warId -> { priorityCid, otherCid, priorityEndAt (ms) } — only entries with a currently
+  // unexpired priorityEndAt are kept (see fetchCountryWarPriorities); a war whose priority has
+  // lapsed since the last scan is filtered again at draw time too (see drawWarPriority).
+  const activeWarPriorities = new Map();
 
   // battleId -> { region, meta, header, countries: Map<countryId,{side,total,events:[{t,dmg}]}> }
   const battles = new Map();
@@ -376,12 +400,16 @@
 
     regionPos = {};
     const positionsByCountry = {}; // initialCountryId -> [[lng,lat], ...]
+    currentRegionsByCountry = {};  // countryId (CURRENT owner) -> [[lng,lat], ...] — see war-priority overlay
     for (const f of feats) {
       const p = f.properties;
       if (!p || !p.position) continue;
       if (p.regionId) regionPos[p.regionId] = p.position;
       if (p.initialCountryId) {
         (positionsByCountry[p.initialCountryId] = positionsByCountry[p.initialCountryId] || []).push(p.position);
+      }
+      if (p.countryId) {
+        (currentRegionsByCountry[p.countryId] = currentRegionsByCountry[p.countryId] || []).push(p.position);
       }
     }
     countryPos = {};
@@ -956,7 +984,7 @@
   // the switch to a newly-active panel instant (just a display:none/'' toggle,
   // never a recompute-from-scratch). All battles' node groups paint above ALL
   // battles' arc groups (two top-level containers), same layering as before.
-  let svg, gAllArcs, gAllNodes, defsEl, gCoreFlags, gProxyFlags;
+  let svg, gAllArcs, gAllNodes, defsEl, gCoreFlags, gProxyFlags, gWarPriority, warArrowMarker;
   const battleDraw = new Map(); // battleId -> { gArcs, gNodes, arcEls: Map<countryId,{...}> }
 
   // The game's battle icons (the "battle-pin"/"region-battle-dot" map layers) are drawn ON the
@@ -1112,6 +1140,27 @@
     gProxyFlags = document.createElementNS(NS, "g"); // proxy-country flag markers, above everything else
     gProxyFlags.style.display = "none";
     svg.appendChild(gProxyFlags);
+    // Arrowhead for the war-priority overlay's arrows (see drawWarPriority) — a single shared
+    // marker def (every arrow's on screen at the same zoom, so one shared size is fine), oriented
+    // per-path automatically via orient="auto-start-reverse". markerUnits="userSpaceOnUse" (not the
+    // default "strokeWidth") deliberately decouples the arrowhead's size from the line's — the line
+    // got thicker at one point but the arrowhead was asked to stay the smaller size it already had,
+    // so markerWidth/markerHeight are set directly in screen px each frame (see WAR_ARROW_HEAD_PX)
+    // instead of scaling automatically off the path's stroke-width.
+    warArrowMarker = document.createElementNS(NS, "marker");
+    warArrowMarker.id = "wdl-war-arrowhead";
+    warArrowMarker.setAttribute("viewBox", "0 0 10 10");
+    warArrowMarker.setAttribute("refX", "8"); warArrowMarker.setAttribute("refY", "5");
+    warArrowMarker.setAttribute("markerUnits", "userSpaceOnUse");
+    warArrowMarker.setAttribute("orient", "auto-start-reverse");
+    const warArrowPath = document.createElementNS(NS, "path");
+    warArrowPath.setAttribute("d", "M 0 0 L 10 5 L 0 10 Z");
+    warArrowPath.setAttribute("fill", WAR_PRIORITY_COLOR);
+    warArrowMarker.appendChild(warArrowPath);
+    defsEl.appendChild(warArrowMarker);
+    gWarPriority = document.createElementNS(NS, "g"); // war-priority arrows, above everything else
+    gWarPriority.style.display = "none";
+    svg.appendChild(gWarPriority);
     // Inject INTO the map container so the lines share the map's stacking context and fall behind
     // the app UI. Fall back to a fixed full-viewport overlay only if the container is unavailable.
     // z-index 10 (not this codebase's old go-to of "near-max-int") — WarEra's own floating chat
@@ -1775,6 +1824,315 @@
     draw(true);
   };
 
+  // Shortest-line anchor points for a priority arrow: the priority holder's OWN region closest to
+  // the other country, paired with the other country's OWN region closest back — not either
+  // country's overall centroid, which could be far from the actual front line for a large/spread-out
+  // country. Falls back to countryPos (core centroid) for a side with zero current regions (fully
+  // occupied — rare, but not impossible). O(regionsA * regionsB) brute-force nearest pair; cheap
+  // enough since this only runs once per scan (10 min), not per draw frame — see fetchCountryWarPriorities.
+  const nearestRegionPair = (cidA, cidB) => {
+    const regionsA = currentRegionsByCountry[cidA];
+    const regionsB = currentRegionsByCountry[cidB];
+    const posA = (regionsA && regionsA.length) ? regionsA : (countryPos[cidA] ? [countryPos[cidA]] : []);
+    const posB = (regionsB && regionsB.length) ? regionsB : (countryPos[cidB] ? [countryPos[cidB]] : []);
+    if (!posA.length || !posB.length) return null;
+    let best = null, bestDist = Infinity;
+    for (const a of posA) {
+      for (const b of posB) {
+        const dist = lngLatDist(a, b);
+        if (dist < bestDist) { bestDist = dist; best = [a, b]; }
+      }
+    }
+    return best; // [posA, posB]
+  };
+
+  // One country's war list — war.getPaginatedWars is scoped to a countryId, sorted newest-updated
+  // first (confirmed live), so a currently-live priority (which requires a very recent battle) is
+  // always near the top; a single page comfortably covers it without needing real pagination.
+  // `isActive` alone isn't a reliable filter (long-dead wars from months ago still come back
+  // isActive:true) — priorityEndAt actually being in the future is what "currently has priority"
+  // means.
+  const fetchCountryWarPriorities = async (cid) => {
+    try {
+      const d = await trpcMutate("war.getPaginatedWars", { countryId: cid, limit: 20, direction: "forward" });
+      const items = (d && d.items) || [];
+      const now = Date.now();
+      const out = [];
+      for (const w of items) {
+        if (!w || !w.isActive || !w.priority || !w.priorityEndAt) continue;
+        const endAt = Date.parse(w.priorityEndAt);
+        if (!Number.isFinite(endAt) || endAt <= now) continue;
+        const attCid = w.attacker && w.attacker.country;
+        const defCid = w.defender && w.defender.country;
+        const otherCid = w.priority === attCid ? defCid : attCid;
+        if (!otherCid) continue;
+        const pair = nearestRegionPair(w.priority, otherCid);
+        if (!pair) continue; // neither side resolvable to any position at all — nothing to anchor on
+        // The other side holding zero CURRENT regions (fully conquered — possibly by a third party
+        // entirely, not this war) means their half of `pair` is really just their core/historical
+        // centroid, not anywhere they actually still are — an arrow pointing there would land on
+        // wherever their last-held region happened to be, reading as if the front line were still
+        // there. Flagged here so drawWarPriority can show a plain "PRIO" label instead of a
+        // (misleading) arrow, anchored at the priority holder's own real position.
+        const otherRegions = currentRegionsByCountry[otherCid];
+        const otherHasNoRegions = !otherRegions || !otherRegions.length;
+        out.push({
+          warId: w._id, priorityCid: w.priority, otherCid, priorityEndAt: endAt,
+          originPos: pair[0], targetPos: pair[1], otherHasNoRegions,
+        });
+      }
+      return out;
+    } catch (_) { return []; }
+  };
+
+  // Every currently-active-priority war shows up in BOTH sides' country war lists (attacker's and
+  // defender's), so this fans out across ALL countries and dedupes by warId — same "loop everyone,
+  // merge by id" shape as buildActiveBattleIndex, just for wars instead of battles.
+  const scanAllWarPriorities = async () => {
+    if (warPriorityScanInFlight) return;
+    warPriorityScanInFlight = true;
+    try {
+      const cids = Object.keys(countryMeta);
+      const results = await mapLimit(cids, WAR_CONCURRENCY, fetchCountryWarPriorities);
+      const merged = new Map();
+      for (const list of results) for (const w of list) merged.set(w.warId, w);
+      activeWarPriorities.clear();
+      for (const [id, w] of merged) activeWarPriorities.set(id, w);
+    } finally {
+      warPriorityScanInFlight = false;
+    }
+    drawWarPriority();
+  };
+
+  // Guarded on `ready` (buildLookups() having actually finished, so countryMeta is populated) — a
+  // "warPriorityConfig" message can arrive (from overlay.js's boot-time storage read) before that,
+  // since content scripts don't queue postMessage against each other's readiness. Without this
+  // guard, a too-early call would scan zero countries, find nothing, and then start()'s later
+  // applyWarPriorityMode() call would no-op against ensureWarPriorityTimer's "already have a timer"
+  // check — leaving the feature silently empty until the user manually re-toggles it.
+  const ensureWarPriorityTimer = () => {
+    if (warPriorityTimer || !ready) return;
+    scanAllWarPriorities();
+    warPriorityTimer = setInterval(scanAllWarPriorities, WAR_PRIORITY_POLL_MS);
+  };
+  const stopWarPriorityTimer = () => {
+    if (warPriorityTimer) { clearInterval(warPriorityTimer); warPriorityTimer = null; }
+  };
+
+  const fmtCountdown = (ms) => {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(s / 3600);
+    if (h > 0) return `${h}h${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`;
+    const m = Math.floor(s / 60);
+    return `${m}m${String(s % 60).padStart(2, "0")}s`;
+  };
+
+  // A region's position (used as both endpoints above) is also where WarEra draws its own
+  // resource/battle icons and its name label — starting/ending the arrow exactly there covers them
+  // up. Trims `pts` (screen-space {x,y}, 2+ points — a straight flat-mode line or a globe-mode
+  // sampled arc) inward by a given pixel distance from each end, walking along the polyline's
+  // actual arc length so it works the same for either shape. If the line's too short to trim both
+  // ends without crossing, it's left alone rather than collapsing to a point or reversing direction.
+  // The margin itself is computed per-frame in drawWarPriority (see WAR_ARROW_MARGIN_PX below) since
+  // it needs to scale with the map's current zoom, not be a flat constant. Dampened (0.5x rate, i.e.
+  // a full doubling takes +2 zoom levels, not +1) and clamped to a narrower range than a straight
+  // 2^zoom curve would give — an undamped curve looked fine near the reference zoom but read as too
+  // thin/small at the lowest zoom and too thick/large at the highest, since the two are many zoom
+  // levels apart on this map.
+  const WAR_ARROW_ZOOM_DAMPING = 0.5;
+  const WAR_ARROW_MARGIN_PX = 32;      // margin at WAR_ARROW_MARGIN_REF_ZOOM
+  const WAR_ARROW_MARGIN_REF_ZOOM = 4; // matches NATIVE_LABEL_MAXZOOM — where this value was tuned
+  const WAR_ARROW_MARGIN_MIN_PX = 8;   // floor for very zoomed-out views — still separates line from icon
+  const WAR_ARROW_MARGIN_MAX_PX = 40;  // ceiling for very zoomed-in views — no need to trim more than this
+  // Same zoom scaling as the margin above, applied to the line's stroke-width.
+  const WAR_ARROW_STROKE_PX = 3;       // stroke width at WAR_ARROW_MARGIN_REF_ZOOM
+  const WAR_ARROW_STROKE_MIN_PX = 2;
+  const WAR_ARROW_STROKE_MAX_PX = 4.5;
+  // Arrowhead size — deliberately its OWN scale, not tied to the (now thicker) line stroke-width
+  // above, since it's meant to stay the same smaller size it already had. Values reproduce what a
+  // markerUnits="strokeWidth" marker with markerWidth=7 rendered at the line's PREVIOUS thickness
+  // (base 2px, 1.25-3px range) — see ensureSvg's wdl-war-arrowhead for why it's userSpaceOnUse now.
+  const WAR_ARROW_HEAD_PX = 14;
+  const WAR_ARROW_HEAD_MIN_PX = 9;
+  const WAR_ARROW_HEAD_MAX_PX = 21;
+  // A short arrow (bordering regions) combined with a large zoomed-in margin can ask to trim away
+  // more than the line's whole length. The margin and the line's on-screen length both scale with
+  // zoom at close to the same rate, so as they cross that point during a continuous zoom gesture,
+  // a hard "does it fit?" branch here would make the rendered line visibly SNAP between its full
+  // untrimmed length and a barely-trimmed sliver right at the crossover — that was the "resets a
+  // couple times" popping. Capping each side's margin to a FRACTION of the total length instead
+  // makes the trim shrink smoothly as the line gets relatively shorter, with no branch to cross.
+  const WAR_ARROW_MAX_TRIM_FRACTION = 0.35; // per side — leaves at least 30% of the line visible
+  const trimPolylineEnds = (pts, startPx, endPx) => {
+    if (pts.length < 2) return pts;
+    const segLens = [];
+    let total = 0;
+    for (let i = 1; i < pts.length; i++) {
+      const len = Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+      segLens.push(len);
+      total += len;
+    }
+    const maxEachSide = total * WAR_ARROW_MAX_TRIM_FRACTION;
+    const startTrim = Math.min(startPx, maxEachSide);
+    const endTrim = Math.min(endPx, maxEachSide);
+    const lerp = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+    const pointAtDistance = (dist) => {
+      let acc = 0;
+      for (let i = 0; i < segLens.length; i++) {
+        if (acc + segLens[i] >= dist) {
+          return { segIdx: i, point: lerp(pts[i], pts[i + 1], segLens[i] > 0 ? (dist - acc) / segLens[i] : 0) };
+        }
+        acc += segLens[i];
+      }
+      return { segIdx: segLens.length - 1, point: pts[pts.length - 1] };
+    };
+    const start = pointAtDistance(startTrim);
+    const end = pointAtDistance(total - endTrim);
+    const out = [start.point];
+    for (let i = start.segIdx + 1; i <= end.segIdx; i++) out.push(pts[i]);
+    out.push(end.point);
+    return out;
+  };
+
+  // A globe-mode arc already curves for long distances (it follows the sphere's great circle,
+  // which visibly bows for a far-apart pair of regions) but reads as a dead-straight line for a
+  // short one — same as every flat-mode line, always straight regardless of distance. Adds a
+  // consistent perpendicular bulge on top of either case (screen space, after projection) so every
+  // arrow gets a slight bend, not just the long globe-mode ones. `pts` may be as few as the 2 raw
+  // endpoints (flat mode) — those get evenly resampled first since a 2-point line has no
+  // intermediate point to actually bend.
+  const WAR_ARROW_SAMPLES = 16;
+  const WAR_ARROW_BEND_FRACTION = 0.08; // perpendicular bulge, as a fraction of the straight-line distance
+  const WAR_ARROW_BEND_MAX_PX = 28;     // cap so a very long arrow doesn't bow out absurdly far
+  const bendPolyline = (pts) => {
+    if (pts.length < 2) return pts;
+    let base = pts;
+    if (base.length === 2) {
+      const [A, B] = base;
+      base = [];
+      for (let i = 0; i <= WAR_ARROW_SAMPLES; i++) {
+        const t = i / WAR_ARROW_SAMPLES;
+        base.push({ x: A.x + (B.x - A.x) * t, y: A.y + (B.y - A.y) * t });
+      }
+    }
+    const A = base[0], B = base[base.length - 1];
+    const dx = B.x - A.x, dy = B.y - A.y, len = Math.hypot(dx, dy) || 1;
+    const nx = -dy / len, ny = dx / len; // perpendicular unit vector — consistent bend side
+    const bend = Math.min(len * WAR_ARROW_BEND_FRACTION, WAR_ARROW_BEND_MAX_PX);
+    const n = base.length - 1;
+    return base.map((p, i) => {
+      const off = bend * Math.sin((i / n) * Math.PI); // 0 at both ends, peak at the middle
+      return { x: p.x + nx * off, y: p.y + ny * off };
+    });
+  };
+
+  // warId -> { g, path, halo, core, label } — pooled per active-priority war, same reuse pattern
+  // as countryArcEls (rebuilt from activeWarPriorities every call, elements only added/removed as
+  // wars gain/lose an active priority).
+  const warPriorityEls = new Map();
+  const drawWarPriority = () => {
+    if (!gWarPriority) return;
+    if (!warPriorityEnabled) { gWarPriority.style.display = "none"; return; }
+    gWarPriority.style.display = "";
+    const now = Date.now();
+    const live = new Set();
+    // Shared by every war this frame — zoom doesn't change war-to-war. Also drives the arrowhead's
+    // size for free: an SVG <marker> defaults to markerUnits="strokeWidth", scaling its content by
+    // the referencing path's current stroke-width, so scaling stroke-width scales the arrowhead too
+    // without touching the <marker> def itself (see ensureSvg's wdl-war-arrowhead).
+    const zoomScale = Math.pow(2, (map.getZoom() - WAR_ARROW_MARGIN_REF_ZOOM) * WAR_ARROW_ZOOM_DAMPING);
+    const margin = Math.max(WAR_ARROW_MARGIN_MIN_PX, Math.min(WAR_ARROW_MARGIN_MAX_PX, WAR_ARROW_MARGIN_PX * zoomScale));
+    const strokeWidth = Math.max(WAR_ARROW_STROKE_MIN_PX, Math.min(WAR_ARROW_STROKE_MAX_PX, WAR_ARROW_STROKE_PX * zoomScale));
+    if (warArrowMarker) {
+      const headSize = Math.max(WAR_ARROW_HEAD_MIN_PX, Math.min(WAR_ARROW_HEAD_MAX_PX, WAR_ARROW_HEAD_PX * zoomScale));
+      warArrowMarker.setAttribute("markerWidth", String(headSize));
+      warArrowMarker.setAttribute("markerHeight", String(headSize));
+    }
+    for (const [warId, w] of activeWarPriorities) {
+      if (w.priorityEndAt <= now) continue; // expired since the last scan — next scan drops it for good
+      const origin = w.originPos, target = w.targetPos;
+      if (!origin || !target) continue;
+      live.add(warId);
+      let e = warPriorityEls.get(warId);
+      if (!e) {
+        const g = document.createElementNS(NS, "g");
+        // Faded at the origin end, full color by two-thirds of the way along — own gradient per
+        // war (not a shared one) since its x1/y1/x2/y2 have to track that war's own line each
+        // frame, same reasoning as makeCountryArc's per-battle gradient below.
+        const grad = document.createElementNS(NS, "linearGradient");
+        grad.setAttribute("gradientUnits", "userSpaceOnUse");
+        grad.id = "wdlwg-" + warId;
+        const s0 = document.createElementNS(NS, "stop"); s0.setAttribute("offset", "0");
+        s0.setAttribute("stop-color", WAR_PRIORITY_COLOR); s0.setAttribute("stop-opacity", "0.25");
+        const s1 = document.createElementNS(NS, "stop"); s1.setAttribute("offset", "0.667");
+        s1.setAttribute("stop-color", WAR_PRIORITY_COLOR); s1.setAttribute("stop-opacity", "1");
+        grad.append(s0, s1);
+        defsEl.appendChild(grad);
+        const path = document.createElementNS(NS, "path");
+        path.setAttribute("fill", "none"); path.setAttribute("stroke", `url(#${grad.id})`);
+        path.setAttribute("stroke-linecap", "round");
+        path.setAttribute("marker-end", "url(#wdl-war-arrowhead)");
+        const label = document.createElementNS(NS, "text");
+        label.setAttribute("text-anchor", "middle"); label.setAttribute("font-size", "11");
+        label.setAttribute("font-family", FLAG_FONT); label.setAttribute("font-weight", "600");
+        label.setAttribute("fill", "#fff"); label.style.paintOrder = "stroke";
+        label.style.stroke = "#000"; label.style.strokeWidth = "2px"; label.style.strokeLinejoin = "round";
+        g.append(path, label);
+        gWarPriority.appendChild(g);
+        e = { g, path, grad, label };
+        warPriorityEls.set(warId, e);
+      }
+      // The other side holding zero current regions means `target` is really just their core
+      // centroid, not anywhere they actually still hold — an arrow there would misleadingly point
+      // at wherever the front line used to be. Show a plain "PRIO <countdown>" label at the
+      // priority holder's own (real) position instead of drawing a line to a place they aren't.
+      if (w.otherHasNoRegions) {
+        const originOcc = isOccludedOnGlobe(origin);
+        e.g.style.display = originOcc ? "none" : "";
+        e.path.style.display = "none";
+        const op = map.project(origin);
+        e.label.setAttribute("x", op.x); e.label.setAttribute("y", op.y - 6);
+        e.label.textContent = `PRIO ${fmtCountdown(w.priorityEndAt - now)}`;
+        e.label.style.display = "";
+        continue;
+      }
+      const originOcc = isOccludedOnGlobe(origin), targetOcc = isOccludedOnGlobe(target);
+      e.g.style.display = (originOcc && targetOcc) ? "none" : "";
+      let rawPts;
+      if (isGlobeMode()) {
+        rawPts = [];
+        for (let i = 0; i <= GLOBE_ARC_SAMPLES; i++) rawPts.push(map.project(slerpLngLat(origin, target, i / GLOBE_ARC_SAMPLES)));
+      } else {
+        rawPts = [map.project(origin), map.project(target)];
+      }
+      const pts = trimPolylineEnds(bendPolyline(rawPts), margin, margin);
+      const d = pts.map((p, i) => (i ? "L " : "M ") + p.x + " " + p.y).join(" ");
+      const mid = pts[Math.floor(pts.length / 2)];
+      const first = pts[0], last = pts[pts.length - 1];
+      e.grad.setAttribute("x1", first.x); e.grad.setAttribute("y1", first.y);
+      e.grad.setAttribute("x2", last.x); e.grad.setAttribute("y2", last.y);
+      e.path.setAttribute("d", d);
+      e.path.setAttribute("stroke-width", String(strokeWidth));
+      e.path.style.display = targetOcc ? "none" : "";
+      e.label.setAttribute("x", mid.x); e.label.setAttribute("y", mid.y - 6);
+      e.label.textContent = fmtCountdown(w.priorityEndAt - now);
+      e.label.style.display = targetOcc ? "none" : "";
+    }
+    for (const [warId, e] of warPriorityEls) {
+      if (!live.has(warId)) { e.g.remove(); e.grad.remove(); warPriorityEls.delete(warId); }
+    }
+  };
+
+  const applyWarPriorityMode = () => {
+    if (warPriorityEnabled) { ensureWarPriorityTimer(); drawWarPriority(); }
+    else { stopWarPriorityTimer(); if (gWarPriority) gWarPriority.style.display = "none"; }
+  };
+
+  const setWarPriorityEnabled = (on) => {
+    warPriorityEnabled = !!on;
+    applyWarPriorityMode();
+  };
+
   const makeCountryArc = (battleId) => {
     const grad = document.createElementNS(NS, "linearGradient");
     grad.setAttribute("gradientUnits", "userSpaceOnUse");
@@ -1859,6 +2217,7 @@
     if (!ready || !svg) return;
     updatePinMask();
     drawCountry();
+    drawWarPriority();
     const watched = watchedBattleIds();
 
     // Drop draw state for battles no longer watched by any panel.
@@ -2122,6 +2481,7 @@
     else if (d.kind === "coreColors") setCoreColorsEnabled(d.enabled);
     else if (d.kind === "proxyConfig") setProxyEnabled(d.enabled);
     else if (d.kind === "proxyData") setProxyData(d.data);
+    else if (d.kind === "warPriorityConfig") setWarPriorityEnabled(d.enabled);
   });
 
   // Clicking a battle pin on the map navigates WarEra's SPA to /battle/<id> without a full page
@@ -2156,6 +2516,7 @@
     draw(true);
     applyColorMode(); // picks up a toggle message that may have arrived before we were ready
     applyProxyMode();
+    applyWarPriorityMode();
     checkBattleNav(true); // report "already on a battle page" once, if that's where we loaded
   };
 

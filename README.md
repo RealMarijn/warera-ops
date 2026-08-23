@@ -2,7 +2,7 @@
 
 # WarEra Ops
 
-A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats, a live battle damage tracker, and map overlays (bases, bunkers, resistance, core country colors, proxy countries) to the [WarEra](https://app.warera.io) browser game — mostly pulled from WarEra's own public API, with a few whitelist-gated features backed by a companion server — styled to match the game's own UI.
+A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats, a live battle damage tracker, and map overlays (bases, bunkers, resistance, core country colors, proxy countries) to the [WarEra](https://app.warera.io) browser game — mostly pulled from WarEra's own public API, with some whitelist-gated features backed by a companion server — styled to match the game's own UI.
 
 ## Table of contents
 
@@ -49,7 +49,7 @@ A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats, a l
 
 - **Military bases / Bunkers** (whitelist-gated) — marks regions with an active or activating base/bunker, with a live countdown and a toast alert when one lights up.
 - **Resistance** (whitelist-gated) — each region's current/max resistance, colour-coded, on the map.
-- **Core country colors** (off by default) — colours regions by their *original* owner instead of whoever currently controls them.
+- **Core country colors** — colours regions by their *original* owner instead of whoever currently controls them.
 - **Proxy countries** (whitelist-gated) — flags puppet countries and shows the controlling ("origin") country's flag on the map.
 
 ### Extension controls

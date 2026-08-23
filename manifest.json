@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "WarEra Ops",
-  "version": "0.2.1",
-  "description": "Adds extra stats, a live battle damage tracker, and map overlays (bases, bunkers, resistance, country colors, proxy countries) to WarEra.",
+  "version": "0.2.2",
+  "description": "Adds extra stats, a live battle damage tracker, and map overlays (bases, bunkers, resistance, proxy countries) to WarEra.",
   "browser_specific_settings": {
     "gecko": {
       "id": "warera-ops@local.extension",
