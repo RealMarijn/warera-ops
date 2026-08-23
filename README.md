@@ -34,7 +34,7 @@ A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats, a l
 
 ### Country & MU
 
-- **Country pages** — Region Diff, Country Bounty, and Current Population tiles, plus Tax Revenue tiles (whitelist-gated). Shows a "(proxy of X)" badge if the country is currently a proxy (see [Map](#map)).
+- **Country pages** — Region Diff and Country Bounty tiles, plus Tax Revenue tiles (whitelist-gated). Shows a "(proxy of X)" badge if the country is currently a proxy (see [Map](#map)).
 - **MU pages** — Bounty, # players in buff/debuff, and Invested Money tiles.
 - **Country/MU account pages** — total inventory value (money + all items at market price).
 
