@@ -50,6 +50,7 @@ A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats, a l
 - **Military bases / Bunkers** (whitelist-gated) — marks regions with an active or activating base/bunker, with a live countdown and a toast alert when one lights up.
 - **Resistance** (whitelist-gated) — each region's current/max resistance, colour-coded, on the map.
 - **Core country colors** — colours regions by their *original* owner instead of whoever currently controls them.
+- **Capitals & unlinked regions** — marks each country's capital and any region cut off from its capital with a small icon. Can't be used together with Core country colors.
 - **Proxy countries** (whitelist-gated) — flags puppet countries and shows the controlling ("origin") country's flag on the map.
 
 ### Extension controls

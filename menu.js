@@ -4,6 +4,8 @@
 //   wdlEnabled            -> the damage-lines overlay (tools/dmg-lines)
 //   wdlCountryEnabled     -> the "Country damage" card (tools/dmg-lines), independent of wdlEnabled
 //   coreColorsEnabled     -> the core-country-colors map mode (tools/dmg-lines/map.js)
+//   regionStatusEnabled   -> the capitals/unlinked-regions overlay (tools/dmg-lines/map.js) —
+//                            mutually exclusive with coreColorsEnabled, see MUTUALLY_EXCLUSIVE below
 //   warPriorityEnabled    -> the war-priority arrow overlay (tools/dmg-lines/map.js)
 //   showProxyEnabled      -> the proxy-country overlay (tools/dmg-lines), whitelist-gated
 //   battleBonusEnabled    -> the per-side damage-bonus breakdown on battle pages (battle-bonus.js)
@@ -15,6 +17,9 @@ const toggles = [
   { el: document.getElementById("toggle-country-dmg"), key: "wdlCountryEnabled", defaultOn: true },
   // Off by default — a bigger visual change to the map than the others, opt-in.
   { el: document.getElementById("toggle-core-colors"), key: "coreColorsEnabled", defaultOn: false },
+  // Off by default, same reasoning — also mutually exclusive with coreColorsEnabled above (see
+  // MUTUALLY_EXCLUSIVE below), so only one of the two region-fill overlays is ever on at once.
+  { el: document.getElementById("toggle-region-status"), key: "regionStatusEnabled", defaultOn: false },
   // Off by default — scanning every country's war list is the heaviest of these toggles, opt-in.
   { el: document.getElementById("toggle-war-priority"), key: "warPriorityEnabled", defaultOn: false },
   { el: document.getElementById("toggle-sr"), key: "srMapEnabled", defaultOn: false },
@@ -40,9 +45,26 @@ browser.storage.local.get(keys).then((v) => {
   updateInventoryCount();
 });
 
+// Core country colors and capitals/unlinked regions both recolor the map's regions — having both
+// on at once would be visually confusing, so checking one here turns the other off (map.js also
+// enforces this independently, but doing it here too keeps the popup's checkboxes/storage honest).
+const MUTUALLY_EXCLUSIVE = { coreColorsEnabled: "regionStatusEnabled", regionStatusEnabled: "coreColorsEnabled" };
+
 for (const t of toggles) {
   t.el.addEventListener("change", () => {
-    browser.storage.local.set({ [t.key]: t.el.checked });
+    const updates = { [t.key]: t.el.checked };
+    const partnerKey = MUTUALLY_EXCLUSIVE[t.key];
+    if (t.el.checked && partnerKey) {
+      const partner = toggles.find((x) => x.key === partnerKey);
+      if (partner && partner.el.checked) {
+        partner.el.checked = false;
+        updates[partnerKey] = false;
+        // Setting .checked in JS doesn't fire the partner's own "change" listener (which is what
+        // normally keeps the "N on" map-features badge in sync) — refresh it here instead.
+        updateMapCount();
+      }
+    }
+    browser.storage.local.set(updates);
   });
 }
 
@@ -51,8 +73,8 @@ for (const t of toggles) {
 // a single expandable section. The header shows how many of them are on so
 // the state is visible while the group is collapsed (its default).
 const mapFeatureKeys = [
-  "srMapEnabled", "coreColorsEnabled", "warPriorityEnabled", "showBasesEnabled", "showBunkersEnabled",
-  "showResistanceEnabled", "showProxyEnabled",
+  "srMapEnabled", "coreColorsEnabled", "regionStatusEnabled", "warPriorityEnabled", "showBasesEnabled",
+  "showBunkersEnabled", "showResistanceEnabled", "showProxyEnabled",
 ];
 const mapFeatureEls = mapFeatureKeys
   .map((key) => toggles.find((t) => t.key === key)?.el)

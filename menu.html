@@ -233,7 +233,7 @@
 
       <div class="row">
         <span class="label">
-          <span>Damage lines</span>
+          <span>Battle damage</span>
           <small>Real-time damage-flow lines on the battle map.</small>
         </span>
         <label class="switch">
@@ -282,10 +282,21 @@
             <div class="row">
               <span class="label">
                 <span>Core country colors</span>
-                <small>Color the map by each region's original owner, not who controls it now.</small>
+                <small>Color the map by each region's original owner, not who controls it now. Can't be used together with capitals &amp; unlinked regions.</small>
               </span>
               <label class="switch">
                 <input type="checkbox" id="toggle-core-colors" />
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="row">
+              <span class="label">
+                <span>Capitals &amp; unlinked regions</span>
+                <small>Mark each country's capital and any region cut off from its capital. Can't be used together with core country colors.</small>
+              </span>
+              <label class="switch">
+                <input type="checkbox" id="toggle-region-status" />
                 <span class="slider"></span>
               </label>
             </div>

@@ -37,8 +37,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlEngine = "0.42.2"; } catch (_) {}
-  console.log("[WDL] map.js engine v0.42.2 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlEngine = "0.43.2"; } catch (_) {}
+  console.log("[WDL] map.js engine v0.43.2 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const NS = "http://www.w3.org/2000/svg";
@@ -99,6 +99,24 @@
   ];
   let coreColorsEnabled = false;
   let savedOwnershipVisibility = null;
+
+  // ---- capitals & unlinked regions overlay ---------------------------------
+  // isCapital/isLinkedToCapital come straight off the same region.getRegionsObject fetch
+  // buildLookups() already does for region names — see there — so this costs nothing extra over
+  // the network. Not whitelist-gated: plain WarEra data, same trust level as core colors below.
+  // Mutually exclusive with core-country-colors (see setRegionStatusEnabled/setCoreColorsEnabled),
+  // enforced both at the popup UI level (menu.js) and re-checked here — this used to also matter
+  // because both features recolored the "regions" source, but this one dropped its fill tint (read
+  // as confusing) and is icon-only now; kept mutually exclusive anyway rather than re-litigating it.
+  // Abstract shapes instead of emoji — a star silhouette (WarEra's own capital-icon path, confirmed
+  // live on a region page) and, for "unlinked", two open rings with a gap between them rather than
+  // a literal chain-link/broken-heart emoji.
+  const CAPITAL_ICON_PATH = "M12,17.27L18.18,21L16.54,13.97L22,9.24L14.81,8.62L12,2L9.19,8.62L2,9.24L7.45,13.97L5.82,21L12,17.27Z";
+  const CAPITAL_ICON_FILL = "#ffd23f";
+  const CAPITAL_ICON_STROKE = "#5a3d00";
+  const UNLINKED_ICON_STROKE = "#ffffff"; // bright, so it still reads against the darker fill above
+  let regionStatusEnabled = false;
+  let gRegionStatusIcons = null;
 
   // ---- proxy-country overlay ----------------------------------------------
   // Whitelisted feature: a country whose current citizenry is dominated by
@@ -429,13 +447,19 @@
     const arr = Array.isArray(list) ? list : Object.values(list);
     for (const c of arr) if (c && c._id) countryMeta[c._id] = { code: c.code, name: c.name, scheme: c.scheme };
 
-    // Region names (for the overlay's battle header) — keyed regionId -> { name }.
-    // Best-effort: a failure here just leaves headers without a region name.
+    // Region names (for the overlay's battle header) plus isCapital/isLinkedToCapital (for the
+    // capitals & unlinked regions map overlay, see rebuildRegionStatusIcons below) — all three come
+    // from this same bulk object (confirmed live), so no extra per-region region.getById fan-out
+    // is needed for either feature. Best-effort: a failure here just leaves both without data.
     try {
       const regions = await trpcRaw("region.getRegionsObject", {});
       const robj = (regions && regions.json) || regions || {};
       regionMeta = {};
-      for (const id in robj) if (robj[id] && robj[id].name) regionMeta[id] = { name: robj[id].name };
+      for (const id in robj) {
+        const r = robj[id];
+        if (!r || !r.name) continue;
+        regionMeta[id] = { name: r.name, isCapital: !!r.isCapital, isLinkedToCapital: r.isLinkedToCapital !== false };
+      }
     } catch (_) { /* keep whatever we had */ }
     return true;
   };
@@ -869,7 +893,84 @@
 
   const setCoreColorsEnabled = (on) => {
     coreColorsEnabled = !!on;
+    // Mutually exclusive with the region-status overlay — see its declaration comment above.
+    if (coreColorsEnabled && regionStatusEnabled) { regionStatusEnabled = false; applyRegionStatusMode(); }
     applyColorMode();
+  };
+
+  // ---- capitals & unlinked regions overlay -------------------------------
+  // Just a small star/broken-link glyph per matching region — an earlier version also tinted the
+  // region's fill, but that read as confusing alongside the normal ownership colors and was dropped.
+  const rebuildRegionStatusIcons = () => {
+    if (!gRegionStatusIcons) return;
+    gRegionStatusIcons.innerHTML = "";
+    for (const id in regionMeta) {
+      const m = regionMeta[id];
+      const pos = regionPos[id];
+      if (!pos) continue;
+      const kind = m.isCapital ? "capital" : (m.isLinkedToCapital === false ? "unlinked" : null);
+      if (!kind) continue;
+      const g = document.createElementNS(NS, "g");
+      g.setAttribute("data-lng", String(pos[0]));
+      g.setAttribute("data-lat", String(pos[1]));
+      if (kind === "capital") {
+        const path = document.createElementNS(NS, "path");
+        path.setAttribute("d", CAPITAL_ICON_PATH);
+        // The path's own coordinates are WarEra's 24x24 icon viewBox — scale down to a small map
+        // marker and re-center it on the group's own (0,0) origin.
+        path.setAttribute("transform", "translate(-9,-9) scale(0.75)");
+        path.setAttribute("fill", CAPITAL_ICON_FILL);
+        path.setAttribute("stroke", CAPITAL_ICON_STROKE);
+        path.setAttribute("stroke-width", "1");
+        g.appendChild(path);
+      } else {
+        // Two open rings with a gap between them — an abstract "broken link" instead of a literal
+        // chain/heart emoji.
+        for (const cx of [-4, 4]) {
+          const c = document.createElementNS(NS, "circle");
+          c.setAttribute("cx", String(cx)); c.setAttribute("cy", "0"); c.setAttribute("r", "3.2");
+          c.setAttribute("fill", "none");
+          c.setAttribute("stroke", UNLINKED_ICON_STROKE);
+          c.setAttribute("stroke-width", "2");
+          g.appendChild(c);
+        }
+      }
+      gRegionStatusIcons.appendChild(g);
+    }
+  };
+
+  const repositionRegionStatusIcons = () => {
+    if (!gRegionStatusIcons || gRegionStatusIcons.style.display === "none") return;
+    for (const el of gRegionStatusIcons.children) {
+      const lng = parseFloat(el.getAttribute("data-lng")), lat = parseFloat(el.getAttribute("data-lat"));
+      if (!Number.isFinite(lng) || !Number.isFinite(lat)) { el.style.display = "none"; continue; }
+      const pos = [lng, lat];
+      if (isOccludedOnGlobe(pos)) { el.style.display = "none"; continue; }
+      el.style.display = "";
+      const p = map.project(pos);
+      el.setAttribute("transform", `translate(${p.x},${p.y})`);
+    }
+  };
+
+  // Idempotent and self-healing, same reasoning as applyColorMode above.
+  const applyRegionStatusMode = () => {
+    if (!map || !ready) return;
+    if (regionStatusEnabled) {
+      if (gRegionStatusIcons) {
+        gRegionStatusIcons.style.display = "";
+        rebuildRegionStatusIcons();
+        repositionRegionStatusIcons();
+      }
+    } else if (gRegionStatusIcons) {
+      gRegionStatusIcons.style.display = "none";
+    }
+  };
+
+  const setRegionStatusEnabled = (on) => {
+    regionStatusEnabled = !!on;
+    // Mutually exclusive with core colors — see the overlay's declaration comment above.
+    if (regionStatusEnabled && coreColorsEnabled) { coreColorsEnabled = false; applyColorMode(); }
+    applyRegionStatusMode();
   };
 
   // ---- battle metadata (region + sides) ---------------------------------
@@ -1161,6 +1262,9 @@
     gWarPriority = document.createElementNS(NS, "g"); // war-priority arrows, above everything else
     gWarPriority.style.display = "none";
     svg.appendChild(gWarPriority);
+    gRegionStatusIcons = document.createElementNS(NS, "g"); // capital/unlinked glyphs, above everything else
+    gRegionStatusIcons.style.display = "none";
+    svg.appendChild(gRegionStatusIcons);
     // Inject INTO the map container so the lines share the map's stacking context and fall behind
     // the app UI. Fall back to a fixed full-viewport overlay only if the container is unavailable.
     // z-index 10 (not this codebase's old go-to of "near-max-int") — WarEra's own floating chat
@@ -2479,6 +2583,7 @@
     else if (d.kind === "selectCountry") selectCountry(d.panelId, d.countryId || null, d.entityType);
     else if (d.kind === "selectCountryWindow") selectCountryWindow(d.panelId, d.window);
     else if (d.kind === "coreColors") setCoreColorsEnabled(d.enabled);
+    else if (d.kind === "regionStatus") setRegionStatusEnabled(d.enabled);
     else if (d.kind === "proxyConfig") setProxyEnabled(d.enabled);
     else if (d.kind === "proxyData") setProxyData(d.data);
     else if (d.kind === "warPriorityConfig") setWarPriorityEnabled(d.enabled);
@@ -2507,14 +2612,16 @@
     ensureSvg();
     try { ready = await buildLookups(); } catch (_) { ready = false; }
     if (!ready) { setTimeout(start, 1500); return; }
-    map.on("render", () => { draw(false); repositionCoreFlags(); repositionProxyFlags(); });   // reproject only
+    map.on("render", () => { draw(false); repositionCoreFlags(); repositionProxyFlags(); repositionRegionStatusIcons(); });   // reproject only
     setInterval(() => {
       draw(true);           // refresh rates + push summaries
       if (coreColorsEnabled) applyColorMode(); // self-heal if WarEra's app wiped our layer
+      if (regionStatusEnabled) applyRegionStatusMode(); // same self-heal, for the region-status layer
       checkBattleNav();
     }, 1000);
     draw(true);
     applyColorMode(); // picks up a toggle message that may have arrived before we were ready
+    applyRegionStatusMode();
     applyProxyMode();
     applyWarPriorityMode();
     checkBattleNav(true); // report "already on a battle page" once, if that's where we loaded

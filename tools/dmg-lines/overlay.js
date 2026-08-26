@@ -28,8 +28,8 @@
 (() => {
   "use strict";
   if (window.top !== window) return;
-  try { document.documentElement.dataset.wdlPanel = "1.21.0"; } catch (_) {}
-  console.log("[WDL] overlay.js panel v1.21.0 (multi-window) loaded");
+  try { document.documentElement.dataset.wdlPanel = "1.22.0"; } catch (_) {}
+  console.log("[WDL] overlay.js panel v1.22.0 (multi-window) loaded");
 
   const CHANNEL = "warera-dmg-lines";
   const FLAG = (code) => `https://media.warera.io/images/flags/${code}.svg?v=16`;
@@ -1021,6 +1021,16 @@
     window.postMessage({ __wdl: CHANNEL, kind: "warPriorityConfig", enabled: on }, location.origin);
   };
 
+  // ---- toggle (capitals & unlinked regions overlay) --------------------------
+  // Same shape as relayCoreColors above — purely a config relay, map.js owns the actual fill layer
+  // and glyph markers. Not whitelisted (plain WarEra region data). Mutually exclusive with core
+  // colors — see map.js's setRegionStatusEnabled/setCoreColorsEnabled — but that's enforced at the
+  // popup UI level (see menu.js's MUTUALLY_EXCLUSIVE handling) and, redundantly, in map.js itself;
+  // this relay is otherwise as simple as core colors'.
+  const relayRegionStatus = (on) => {
+    window.postMessage({ __wdl: CHANNEL, kind: "regionStatus", enabled: on }, location.origin);
+  };
+
   // ---- toggle (proxy-country overlay, whitelisted) --------------------------
   // Independent of every toggle above — purely a config+data relay to map.js,
   // which owns the actual map layer/flags. This side's whole job is the two
@@ -1091,6 +1101,7 @@
     chrome.storage?.onChanged.addListener((ch) => {
       if (ch.wdlEnabled) setEnabled(ch.wdlEnabled.newValue !== false);
       if (ch.coreColorsEnabled) relayCoreColors(ch.coreColorsEnabled.newValue === true);
+      if (ch.regionStatusEnabled) relayRegionStatus(ch.regionStatusEnabled.newValue === true);
       if (ch.warPriorityEnabled) relayWarPriority(ch.warPriorityEnabled.newValue === true);
       if (ch.wdlCountryEnabled) setCountryFeatureEnabled(ch.wdlCountryEnabled.newValue !== false);
       if (ch[PROXY_STORAGE_KEY]) setProxyFeatureEnabled(ch[PROXY_STORAGE_KEY].newValue !== false);
@@ -1679,7 +1690,7 @@
       // (top:24px;left:24px, set above) is already correct and needs no JS repositioning,
       // so there's no flash-then-jump on a fresh install / first-ever load.
       chrome.storage?.local.get(
-        ["wdlPos", "wdlSize", "wdlEnabled", "coreColorsEnabled", "wdlCountryEnabled", "warPriorityEnabled", PROXY_STORAGE_KEY],
+        ["wdlPos", "wdlSize", "wdlEnabled", "coreColorsEnabled", "regionStatusEnabled", "wdlCountryEnabled", "warPriorityEnabled", PROXY_STORAGE_KEY],
         (v) => {
           if (v.wdlPos) {
             const left = parseFloat(v.wdlPos.left), top = parseFloat(v.wdlPos.top);
@@ -1697,6 +1708,7 @@
           setEnabled(v.wdlEnabled !== false);
           setCountryFeatureEnabled(v.wdlCountryEnabled !== false);
           relayCoreColors(v.coreColorsEnabled === true);
+          relayRegionStatus(v.regionStatusEnabled === true);
           relayWarPriority(v.warPriorityEnabled === true);
           // Whitelist-gated — actual on/off also depends on refreshProxyAuth's login check
           // (see proxyEff), which relays config + starts polling once that resolves. !== false
@@ -1712,6 +1724,7 @@
       relayConfig();
       relayCountryConfig();
       relayCoreColors(false);
+      relayRegionStatus(false);
       refreshProxyAuth();
     }
     // The engine (map.js) needs a moment to build its country/region lookups before
