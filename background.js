@@ -101,35 +101,60 @@ function broadcastAuthChanged() {
   browser.runtime.sendMessage({ type: "WARERA_OPS_AUTH_CHANGED" }).catch(() => {});
 }
 
+// Serializes concurrent refresh attempts — see getValidAccessToken's comment below for why this
+// exists. null whenever no refresh is currently in progress.
+let refreshInFlight = null;
+
 // Returns a live access token, refreshing it first if it's missing/near-expiry.
 // Refresh tokens rotate on every use (see extension_tokens.py) — a session that
 // was revoked server-side (logged out elsewhere, de-whitelisted, or a shared
 // token got caught by reuse detection) surfaces here as a failed refresh, which
 // clears local state so the UI falls back to "logged out" instead of retrying
 // forever with a dead token.
+//
+// This is routinely called from several content scripts/pollers around the same
+// moment (proxy poll, bases/bunkers poll, the popup's connection check, ...).
+// Without de-duplication, each would independently fire its own
+// /api/ext/auth/refresh using the SAME (not-yet-rotated) refresh token —
+// extension_auth.py's rotate_extension_session only lets the FIRST of those
+// succeed, and by design (reuse detection) treats every other concurrent use of
+// that same token as a red flag. The losing caller's request would then fail
+// here and wipe out the auth the winning caller had just stored moments earlier
+// — an entirely self-inflicted logout that reportedly happened roughly daily
+// (enough pollers, run for long enough, eventually collide). Funneling every
+// call through one shared in-flight promise means only one refresh HTTP
+// request is ever made per service-worker lifetime, so this race can no longer
+// happen client-side — legitimate server-side reuse detection (e.g. a token
+// actually shared across two separate browser profiles) is unaffected.
 async function getValidAccessToken() {
   const auth = await getStoredAuth();
   if (!auth.refreshToken) return null;
   if (auth.accessToken && auth.accessExp - ACCESS_TOKEN_REFRESH_SKEW_MS > Date.now()) {
     return auth.accessToken;
   }
-  try {
-    const res = await fetch(`${BACKEND}/api/ext/auth/refresh`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh_token: auth.refreshToken }),
-    });
-    if (!res.ok) throw new Error(`refresh failed: HTTP ${res.status}`);
-    const data = await res.json();
-    await storeAuth({ ...data, user: auth.user });
-    broadcastAuthChanged();
-    return data.access_token;
-  } catch (err) {
-    console.warn("[WarEra Ops] token refresh failed, logging out locally:", err);
-    await clearStoredAuth();
-    broadcastAuthChanged();
-    return null;
-  }
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = (async () => {
+    try {
+      const res = await fetch(`${BACKEND}/api/ext/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: auth.refreshToken }),
+      });
+      if (!res.ok) throw new Error(`refresh failed: HTTP ${res.status}`);
+      const data = await res.json();
+      await storeAuth({ ...data, user: auth.user });
+      broadcastAuthChanged();
+      return data.access_token;
+    } catch (err) {
+      console.warn("[WarEra Ops] token refresh failed, logging out locally:", err);
+      await clearStoredAuth();
+      broadcastAuthChanged();
+      return null;
+    } finally {
+      refreshInFlight = null;
+    }
+  })();
+  return refreshInFlight;
 }
 
 async function getAuthStatus() {
