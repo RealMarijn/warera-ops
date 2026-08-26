@@ -52,6 +52,7 @@ A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats, a l
 - **Core country colors** — colours regions by their *original* owner instead of whoever currently controls them.
 - **Capitals & unlinked regions** — marks each country's capital and any region cut off from its capital with a small icon. Can't be used together with Core country colors.
 - **Proxy countries** (whitelist-gated) — flags puppet countries and shows the controlling ("origin") country's flag on the map.
+- **Priority lines** - shows the priority + duration & direction of wars between countries
 
 ### Extension controls
 
