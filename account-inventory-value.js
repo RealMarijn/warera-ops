@@ -1,9 +1,19 @@
 // Feature: on a country's or MU's account page, adds a "Total Value" entry in front of the
 // money figure in the inventory row, equal to money + (each item's quantity × its current market
-// price from itemTrading.getPrices). Both page types render this row with identical markup, so
-// one implementation covers both rather than duplicating it. The new entry is a clone of the
-// money entry itself (so it inherits the game's real icon-row styling), with the coin icon
-// swapped for a sigma glyph so it doesn't read as a duplicate of the adjacent money figure.
+// price from itemTrading.getPrices) + open buy/sell market orders. Both page types render this
+// row with identical markup, so one implementation covers both rather than duplicating it. The
+// new entry is a clone of the money entry itself (so it inherits the game's real icon-row
+// styling), with the coin icon swapped for a sigma glyph so it doesn't read as a duplicate of the
+// adjacent money figure.
+//
+// Buy/sell orders matter here because money escrowed in a buy order, and items listed in a sell
+// order, both disappear from the displayed money/inventory figures while the order is open — so
+// ignoring them understates net worth. Buy orders are added at the game's own "Total:" face
+// value (that's real money the country/MU has already committed, not manipulable). Sell orders
+// are NOT trusted at face value: the listed total is quantity × the seller's own chosen price,
+// which can be set arbitrarily high purely to inflate the displayed total. Instead each sell
+// order's item + quantity is read off directly and revalued at the real market price, exactly
+// like inventory items.
 (function () {
   const MARKER_ATTR = "data-warera-ops-total-value";
   const MONEY_PATH_PREFIX = "M12 5C7.031 5 2 6.546 2 9.5S7.031 14"; // WarEra's "money" coin glyph
@@ -107,6 +117,66 @@
     return parseFormattedNumber(el?.textContent);
   }
 
+  // Finds the money figure attached to a "Total:" header row (used for the Buy orders header,
+  // which is always denominated in money) — the coin <svg><path> plus the value span right after
+  // its icon wrapper.
+  function readHeaderMoneyTotal(headerBlock) {
+    for (const path of headerBlock.querySelectorAll("svg path")) {
+      if (!isMoneyPath(path.getAttribute("d"))) continue;
+      const iconDiv = path.closest("svg")?.parentElement;
+      const value = parseFormattedNumber(iconDiv?.nextElementSibling?.textContent);
+      if (typeof value === "number") return value;
+    }
+    return null;
+  }
+
+  // Locates the "Buy orders" / "Sell orders" block: a title div (no children, exact text match),
+  // whose grandparent header row sits alongside the individual order-entry rows as siblings
+  // inside a shared container.
+  function findOrdersSection(title) {
+    const titleEl = Array.from(document.querySelectorAll("div")).find(
+      (d) => d.children.length === 0 && d.textContent.trim() === title
+    );
+    const headerBlock = titleEl?.parentElement?.parentElement;
+    const container = headerBlock?.parentElement;
+    if (!headerBlock || !container) return null;
+    const orderEntries = Array.from(container.children).filter((el) => el !== headerBlock);
+    return { headerBlock, orderEntries };
+  }
+
+  function readOrderItemCode(entry) {
+    // Order rows also contain a country flag <img> and a user avatar <img>, both carrying
+    // width/height attributes (Next.js Image) — the item icon is the only alt-tagged <img>
+    // without them.
+    const img = entry.querySelector("img[alt]:not([width])");
+    return img ? stripSkin(img.getAttribute("alt")) : null;
+  }
+
+  function computeBuyOrdersValue() {
+    const section = findOrdersSection("Buy orders");
+    if (!section) return 0;
+    return readHeaderMoneyTotal(section.headerBlock) ?? 0;
+  }
+
+  function computeSellOrdersValue(prices) {
+    const section = findOrdersSection("Sell orders");
+    if (!section) return { value: 0, unpriced: 0 };
+    let value = 0;
+    let unpriced = 0;
+    for (const entry of section.orderEntries) {
+      const itemCode = readOrderItemCode(entry);
+      const quantity = readQuantity(entry);
+      if (!itemCode || typeof quantity !== "number") continue;
+      const price = prices[itemCode];
+      if (typeof price === "number") {
+        value += quantity * price;
+      } else {
+        unpriced += 1;
+      }
+    }
+    return { value, unpriced };
+  }
+
   function computeTotalValue(container, prices) {
     const moneyEntry = findMoneyEntry(container);
     if (!moneyEntry) return null;
@@ -128,21 +198,26 @@
       }
     }
 
-    return { total: money + itemsValue, moneyEntry, unpriced };
+    const buyOrdersValue = computeBuyOrdersValue();
+    const sellOrders = computeSellOrdersValue(prices);
+    unpriced += sellOrders.unpriced;
+
+    return {
+      total: money + itemsValue + buyOrdersValue + sellOrders.value,
+      moneyEntry,
+      unpriced,
+    };
   }
 
   function buildTotalEntry(moneyEntry, total, unpriced) {
     const entry = moneyEntry.cloneNode(true);
     entry.setAttribute(MARKER_ATTR, "true");
 
-    // Always shown: a country's/MU's displayed money/item quantities don't reflect what's tied
-    // up in its own pending buy orders (money reserved) or sell orders (items listed), so this
-    // total can be off in either direction even when every item type has a known price.
     const notes = [
-      "This total may be inaccurate: pending buy/sell market orders can reserve money or items that aren't reflected in the displayed balance.",
+      "Includes money reserved in open buy orders (at face value) and items listed in open sell orders (valued at the current market price, not the seller's own listed price).",
     ];
     if (unpriced > 0) {
-      notes.push(`${unpriced} item type(s) in this inventory have no market price and aren't included.`);
+      notes.push(`${unpriced} item type(s) (in the inventory and/or open sell orders) have no market price and aren't included.`);
     }
     entry.title = notes.join(" ");
 
@@ -160,6 +235,16 @@
     return entry;
   }
 
+  // Prices used to be fetched once per page load and cached forever — fine for a quick visit, but
+  // this content script (and its cached `prices`) stays alive for as long as the tab is open, and
+  // item prices drift continuously as trades happen elsewhere. Someone who opened the account page
+  // hours ago and someone who just opened it moments ago would end up computing the "same" total
+  // from two very different price snapshots, with no indication either total was stale — which is
+  // exactly what produced wildly different totals for the same country across different viewers.
+  // Refetching periodically (and rebuilding the displayed entry when prices change) keeps a
+  // long-lived tab from drifting away from the current market.
+  const PRICE_REFRESH_MS = 2 * 60 * 1000;
+
   let prices = null;
   let pricesPromise = null;
 
@@ -167,6 +252,16 @@
     if (pricesPromise) return;
     pricesPromise = fetchPrices().then((p) => {
       prices = p;
+      scheduleSync();
+    });
+  }
+
+  function refreshPrices() {
+    fetchPrices().then((p) => {
+      prices = p;
+      // Force the next sync() to rebuild the entry instead of leaving the stale one in place —
+      // sync() otherwise skips recomputation once an entry is already present for a container.
+      document.querySelectorAll(`[${MARKER_ATTR}]`).forEach((el) => el.remove());
       scheduleSync();
     });
   }
@@ -200,6 +295,7 @@
   let active = false;
   let observer = null;
   let pollInterval = null;
+  let priceRefreshTimer = null;
   let lastPath = null;
   let scheduled = false;
   let featureEnabled = true; // popup key "accountInventoryValueEnabled" (default on)
@@ -244,6 +340,8 @@
       }
     }, 800);
 
+    priceRefreshTimer = setInterval(refreshPrices, PRICE_REFRESH_MS);
+
     scheduleSync();
   }
 
@@ -260,6 +358,10 @@
     if (pollInterval) {
       clearInterval(pollInterval);
       pollInterval = null;
+    }
+    if (priceRefreshTimer) {
+      clearInterval(priceRefreshTimer);
+      priceRefreshTimer = null;
     }
     document.querySelectorAll(`[${MARKER_ATTR}]`).forEach((el) => el.remove());
     prices = null;
