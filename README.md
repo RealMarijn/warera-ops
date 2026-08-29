@@ -29,7 +29,7 @@ A browser extension (Firefox and Chrome, Manifest V3) that adds extra stats, a l
 
 ### Profile & inventory
 
-- **Profile pages** — extra ranking tiles: Bounty, Cases opened, Elite cases opened, Gems purchased, Health, Hunger. Hover a cases tile for a loot rarity breakdown.
+- **Profile pages** — extra ranking tiles: Elite cases opened, Health, Hunger. Hover the elite cases tile for a loot rarity breakdown.
 - **Inventory page** — "Export JSON" button next to Craft/Dismantle, for your full items and equipment.
 
 ### Country & MU

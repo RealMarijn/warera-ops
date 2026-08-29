@@ -6,12 +6,18 @@
   const BADGE_BASE_CLASSES = ["chnava4", "chnavau"]; // shared by every tile's rank badge, unlike the tier-color class
 
   const ICONS = {
-    userBounty: `<circle cx="12" cy="12" r="9"></circle><circle cx="12" cy="12" r="5"></circle><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"></circle>`,
-    userCasesOpened: `<path d="M3 7l9-4 9 4-9 4-9-4z"></path><path d="M3 7v10l9 4 9-4V7"></path><path d="M12 11v10"></path>`,
-    userGemsPurchased: `<path d="M6 3h12l4 6-10 12L2 9z"></path><path d="M2 9h20M9 3l-3 6 6 12 6-12-3-6"></path>`,
     userEliteCasesOpened: `<path d="M3 7l9-4 9 4-9 4-9-4z"></path><path d="M3 7v10l9 4 9-4V7"></path><path d="M12 11v10"></path><path d="M12 2.5l1.2 2.4 2.6.4-1.9 1.9.5 2.6-2.4-1.3-2.4 1.3.5-2.6-1.9-1.9 2.6-.4z" fill="currentColor" stroke="none"></path>`,
   };
   const DEFAULT_ICON = `<circle cx="12" cy="12" r="9"></circle><path d="M12 7v6l4 2"></path>`;
+
+  // WarEra's own UI now renders these rank tiles natively, so injecting our own copies would just
+  // duplicate them — skip regardless of whether the real tile happens to be on the page yet.
+  const EXCLUDED_RANKING_KEYS = new Set([
+    "userBounty",
+    "userCasesOpened",
+    "userGemsPurchased",
+    "userMissionsClaimed",
+  ]);
 
   // Full standalone icons (own viewBox + fill) rather than paths for the shared stroke-based
   // template above — these came from the user's own SVG files, colors included.
@@ -21,9 +27,6 @@
   };
 
   const LABELS = {
-    userBounty: "Bounty",
-    userCasesOpened: "Cases opened",
-    userGemsPurchased: "Gems purchased",
     userEliteCasesOpened: "Elite cases opened",
     userHealth: "Health",
     userHunger: "Hunger",
@@ -55,7 +58,6 @@
 
   // Loot breakdown shown on hover for tiles backed by a `case*` stats block.
   const LOOT_SOURCE = {
-    userCasesOpened: { title: "Case Loot", getData: () => state.stats?.case1?.byRarity },
     userEliteCasesOpened: { title: "Elite Case Loot", getData: () => state.stats?.case2?.byRarity },
   };
   const RARITY_ORDER = ["common", "uncommon", "rare", "epic", "legendary", "mythic"];
@@ -414,7 +416,9 @@
       )
     );
 
-    const missingRankingKeys = Object.keys(state.rankings).filter((key) => !existingKeys.has(key));
+    const missingRankingKeys = Object.keys(state.rankings).filter(
+      (key) => !existingKeys.has(key) && !EXCLUDED_RANKING_KEYS.has(key)
+    );
     const missingExtraKeys = EXTRA_TILES.filter(
       (extra) => extra.getStat() !== undefined && !existingKeys.has(extra.key)
     ).map((extra) => extra.key);

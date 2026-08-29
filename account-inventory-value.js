@@ -90,26 +90,47 @@
     }
   }
 
-  // Anchored on the "Inventory" section title text rather than a hashed class — the row of
-  // money + item entries is its next sibling.
-  function findInventoryContainer() {
+  // Anchored on the "Inventory" section title text rather than a hashed class. Returns the card
+  // body containing the whole section (title + money + items) rather than a specific row: WarEra
+  // has changed how money/items are grouped under here before — they used to be flat siblings
+  // right after the title, then WarEra added a divider and moved items into their own grid div —
+  // so hardcoding "the next sibling" silently stopped finding any items at all once that shipped.
+  // Searching the whole card body and picking out entries by what they contain (an item icon, a
+  // money icon) rather than by position survives that kind of layout change.
+  function findInventoryCardBody() {
     const titleSpan = Array.from(document.querySelectorAll("span")).find(
       (s) => s.textContent.trim() === "Inventory"
     );
     const titleRow = titleSpan?.parentElement?.parentElement;
-    return titleRow?.nextElementSibling || null;
+    return titleRow?.parentElement || null;
   }
 
-  function findMoneyEntry(container) {
-    return Array.from(container.children).find((entry) => {
-      if (entry.querySelector("img[alt]")) return false; // item entries have an item image
-      const path = entry.querySelector("svg path");
-      return path && isMoneyPath(path.getAttribute("d"));
+  // Keeps only the innermost matches from a list of candidate elements — needed because a
+  // candidate's own ancestor (e.g. a row or grid wrapping several entries) can also satisfy the
+  // same "contains X and Y" check.
+  function innermost(candidates) {
+    return candidates.filter((el) => !candidates.some((other) => other !== el && el.contains(other)));
+  }
+
+  function findMoneyEntry(cardBody) {
+    const candidates = Array.from(cardBody.querySelectorAll("*")).filter((el) => {
+      if (el.hasAttribute(MARKER_ATTR)) return false; // skip our own injected entry
+      if (el.querySelector("img[alt]")) return false; // item entries have an item image
+      const path = el.querySelector("svg path");
+      return (
+        path &&
+        isMoneyPath(path.getAttribute("d")) &&
+        !!el.querySelector('div[style*="display: inline-block"]')
+      );
     });
+    return innermost(candidates)[0];
   }
 
-  function findItemEntries(container) {
-    return Array.from(container.children).filter((entry) => entry.querySelector("img[alt]"));
+  function findItemEntries(cardBody) {
+    const candidates = Array.from(cardBody.querySelectorAll("*")).filter(
+      (el) => el.querySelector("img[alt]") && el.querySelector('div[style*="display: inline-block"]')
+    );
+    return innermost(candidates);
   }
 
   function readQuantity(entry) {
@@ -130,11 +151,22 @@
     return null;
   }
 
-  // Locates the "Buy orders" / "Sell orders" block: a title div (no children, exact text match),
-  // whose grandparent header row sits alongside the individual order-entry rows as siblings
-  // inside a shared container.
+  // Anchored on the market widget's own "/market" link rather than a hashed class — its parent is
+  // the card body holding the Buy orders / Sell orders columns.
+  function findMarketCardBody() {
+    return document.querySelector('a[href="/market"]')?.parentElement || null;
+  }
+
+  // Locates the "Buy orders" / "Sell orders" block within the market card: a title div (no
+  // children, exact text match), whose grandparent header row sits alongside the individual
+  // order-entry rows as siblings inside a shared container. Scoped to the market card (rather
+  // than searching the whole document) so this can't accidentally match an unrelated element
+  // elsewhere on the page that happens to contain the same text (e.g. a hidden dialog template) —
+  // that's exactly what silently zeroed out Sell orders while Buy orders kept working.
   function findOrdersSection(title) {
-    const titleEl = Array.from(document.querySelectorAll("div")).find(
+    const marketCardBody = findMarketCardBody();
+    if (!marketCardBody) return null;
+    const titleEl = Array.from(marketCardBody.querySelectorAll("div")).find(
       (d) => d.children.length === 0 && d.textContent.trim() === title
     );
     const headerBlock = titleEl?.parentElement?.parentElement;
@@ -158,12 +190,28 @@
     return readHeaderMoneyTotal(section.headerBlock) ?? 0;
   }
 
+  // Sell-order rows, found the same content-based way as inventory items (rather than assuming
+  // they're direct siblings of the "Sell orders" header — that assumption is exactly what left
+  // this silently computing zero after WarEra's last layout change). Each row contains an item
+  // icon, a quantity, and the word "sells" (vs. "wants" for buy rows) — filtering on that keyword
+  // also excludes the header's own icon+quantity breakdown, which matches the icon/quantity shape
+  // but not the keyword.
+  function findSellOrderEntries() {
+    const marketCardBody = findMarketCardBody();
+    if (!marketCardBody) return [];
+    const candidates = Array.from(marketCardBody.querySelectorAll("*")).filter(
+      (el) =>
+        el.querySelector("img[alt]") &&
+        el.querySelector('div[style*="display: inline-block"]') &&
+        el.textContent.includes("sells")
+    );
+    return innermost(candidates);
+  }
+
   function computeSellOrdersValue(prices) {
-    const section = findOrdersSection("Sell orders");
-    if (!section) return { value: 0, unpriced: 0 };
     let value = 0;
     let unpriced = 0;
-    for (const entry of section.orderEntries) {
+    for (const entry of findSellOrderEntries()) {
       const itemCode = readOrderItemCode(entry);
       const quantity = readQuantity(entry);
       if (!itemCode || typeof quantity !== "number") continue;
@@ -177,15 +225,15 @@
     return { value, unpriced };
   }
 
-  function computeTotalValue(container, prices) {
-    const moneyEntry = findMoneyEntry(container);
+  function computeTotalValue(cardBody, prices) {
+    const moneyEntry = findMoneyEntry(cardBody);
     if (!moneyEntry) return null;
     const money = readQuantity(moneyEntry);
     if (typeof money !== "number") return null;
 
     let itemsValue = 0;
     let unpriced = 0;
-    for (const entry of findItemEntries(container)) {
+    for (const entry of findItemEntries(cardBody)) {
       const img = entry.querySelector("img[alt]");
       const itemCode = stripSkin(img.getAttribute("alt"));
       const quantity = readQuantity(entry);
@@ -209,6 +257,23 @@
     };
   }
 
+  // Shared by the real entry and the loading placeholder below — both are a clone of the money
+  // entry with its coin icon swapped for a sigma glyph (so it doesn't read as a duplicate of the
+  // adjacent money figure) and its value text replaced.
+  function applySigmaEntry(entry, text, title) {
+    entry.title = title;
+    const iconHolder = entry.querySelector(".a6izou0");
+    if (iconHolder) {
+      iconHolder.innerHTML = `
+        <svg viewBox="0 0 24 24" style="width:1em;height:1em;font-size:120%;filter:drop-shadow(black 1px 1px 0px);" fill="currentColor">
+          ${SIGMA_ICON}
+        </svg>
+      `;
+    }
+    const valueContainer = entry.querySelector('div[style*="display: inline-block"]');
+    if (valueContainer) valueContainer.textContent = text;
+  }
+
   function buildTotalEntry(moneyEntry, total, unpriced) {
     const entry = moneyEntry.cloneNode(true);
     entry.setAttribute(MARKER_ATTR, "true");
@@ -219,19 +284,17 @@
     if (unpriced > 0) {
       notes.push(`${unpriced} item type(s) (in the inventory and/or open sell orders) have no market price and aren't included.`);
     }
-    entry.title = notes.join(" ");
+    applySigmaEntry(entry, `${formatNumber(total)} *`, notes.join(" "));
+    return entry;
+  }
 
-    const iconHolder = entry.querySelector(".a6izou0");
-    if (iconHolder) {
-      iconHolder.innerHTML = `
-        <svg viewBox="0 0 24 24" style="width:1em;height:1em;font-size:120%;filter:drop-shadow(black 1px 1px 0px);" fill="currentColor">
-          ${SIGMA_ICON}
-        </svg>
-      `;
-    }
-    const valueContainer = entry.querySelector('div[style*="display: inline-block"]');
-    if (valueContainer) valueContainer.textContent = `${formatNumber(total)} *`;
-
+  // Shown the instant the money entry exists, before item prices have come back — without this
+  // the row silently shows nothing at all for however long the fetch takes, which reads as broken
+  // rather than loading.
+  function buildLoadingEntry(moneyEntry) {
+    const entry = moneyEntry.cloneNode(true);
+    entry.setAttribute(MARKER_ATTR, "true");
+    applySigmaEntry(entry, "Loading…", "Fetching current item prices to compute the total value…");
     return entry;
   }
 
@@ -259,12 +322,14 @@
   function refreshPrices() {
     fetchPrices().then((p) => {
       prices = p;
-      // Force the next sync() to rebuild the entry instead of leaving the stale one in place —
-      // sync() otherwise skips recomputation once an entry is already present for a container.
-      document.querySelectorAll(`[${MARKER_ATTR}]`).forEach((el) => el.remove());
       scheduleSync();
     });
   }
+
+  // Last {total, unpriced} we actually displayed — lets sync() tell "nothing changed" apart from
+  // "something changed", so it can keep re-checking on every mutation without re-inserting the
+  // entry (and re-triggering the very observer that called it) when the numbers are unchanged.
+  let lastComputed = null;
 
   function sync() {
     if (!active || !window.WarEraOps.isEnabled()) return;
@@ -273,23 +338,47 @@
     // battle-contracts.js's "Open contracts" toggle.
     if (!featureEnabled) {
       document.querySelectorAll(`[${MARKER_ATTR}]`).forEach((el) => el.remove());
+      lastComputed = null;
       return;
     }
-    if (!isAccountPage()) return;
+    if (!isAccountPage()) {
+      lastComputed = null;
+      return;
+    }
 
-    const container = findInventoryContainer();
-    if (!container) return;
-    if (container.querySelector(`[${MARKER_ATTR}]`)) return; // already injected for this container
+    const cardBody = findInventoryCardBody();
+    if (!cardBody) return;
 
     if (!prices) {
       ensurePrices();
+      if (!cardBody.querySelector(`[${MARKER_ATTR}]`)) {
+        const moneyEntry = findMoneyEntry(cardBody);
+        if (moneyEntry) moneyEntry.parentElement.insertBefore(buildLoadingEntry(moneyEntry), moneyEntry);
+      }
       return;
     }
 
-    const result = computeTotalValue(container, prices);
+    // Deliberately recomputed on every call rather than skipped once an entry exists: the
+    // Inventory box and the Buy orders/Sell orders widget are separate, independently-loading
+    // parts of the page, so the first computation can easily land before the orders widget has
+    // rendered — undercounting buy/sell orders permanently if we never looked again. Re-reading
+    // findMoneyEntry() here still finds the real money entry even with our own entry already in
+    // the DOM, since our clone's icon path no longer matches isMoneyPath.
+    const result = computeTotalValue(cardBody, prices);
     if (!result) return;
 
-    container.insertBefore(buildTotalEntry(result.moneyEntry, result.total, result.unpriced), result.moneyEntry);
+    if (lastComputed && lastComputed.total === result.total && lastComputed.unpriced === result.unpriced) {
+      return; // unchanged — leave the existing entry alone
+    }
+    lastComputed = { total: result.total, unpriced: result.unpriced };
+
+    cardBody.querySelector(`[${MARKER_ATTR}]`)?.remove();
+    // Insert as a sibling of the actual money entry, not of cardBody — cardBody is just the
+    // broad search root now, and may not be the money entry's direct parent.
+    result.moneyEntry.parentElement.insertBefore(
+      buildTotalEntry(result.moneyEntry, result.total, result.unpriced),
+      result.moneyEntry
+    );
   }
 
   let active = false;
@@ -306,10 +395,14 @@
   function scheduleSync() {
     if (!active || scheduled) return;
     scheduled = true;
-    requestAnimationFrame(() => {
+    // setTimeout rather than requestAnimationFrame: rAF callbacks are paused/heavily throttled by
+    // the browser while the tab isn't visible/focused, so a page loaded or updated in a background
+    // tab would never actually run sync() — the entry only appeared once you switched to the tab
+    // (e.g. by clicking the toolbar icon, which brings it into focus as a side effect).
+    setTimeout(() => {
       scheduled = false;
       sync();
-    });
+    }, 0);
   }
 
   function activate() {
@@ -336,6 +429,7 @@
     pollInterval = setInterval(() => {
       if (location.pathname !== lastPath) {
         lastPath = location.pathname;
+        lastComputed = null; // different account page — don't compare its total against the old one
         scheduleSync();
       }
     }, 800);
@@ -366,6 +460,7 @@
     document.querySelectorAll(`[${MARKER_ATTR}]`).forEach((el) => el.remove());
     prices = null;
     pricesPromise = null;
+    lastComputed = null;
   }
 
   window.WarEraOps.registerFeature({ name: "accountInventoryValue", activate, deactivate });
