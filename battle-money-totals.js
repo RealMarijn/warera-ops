@@ -1,11 +1,78 @@
 // Feature: on a battle page, when the leaderboard is showing money, adds a "Total" tile above
 // each side's list with the true total money earned — pulled from battleRanking.getRanking
 // (dataType: "money") rather than summing the DOM, since the page only ever renders whatever's
-// been loaded via "Show more" and a DOM sum would silently be partial. The battle-wide total is
-// used regardless of which round tab is selected (battleId only, no roundId).
+// been loaded via "Show more" and a DOM sum would silently be partial.
+//
+// The tile follows whichever Round #N / Battle tab is currently selected — confirmed against
+// WarEra's own network traffic that a round-scoped query is `{side, roundId, type, dataType}`
+// with NO battleId, while the battle-wide query is `{battleId, dataType, type, side}` with no
+// roundId; sending both together returns zero results (round-scoped ranking records apparently
+// aren't also tagged with their battle). Round IDs themselves aren't in the DOM anywhere — they
+// come from battle.getById's `rounds` array, matched to "Round #N" by position (rounds[0] = #1).
 (function () {
   const MARKER_ATTR = "data-warera-ops-battle-total";
   const MAX_PAGES = 200; // safety cap in case pagination never terminates
+  const REQUEST_SPACING_MS = 600;
+
+  // Which (battleId, roundId) the user is actually looking at right now — set at the top of
+  // sync() on every pass. A pagination sweep for a tab the user has since switched away from
+  // checks this and bails instead of continuing to burn through the rate limit for a total that's
+  // no longer even going to be shown.
+  let activeSelectionKey = null;
+  const ABORTED = Symbol("aborted-stale-selection");
+
+  // Summing a big battle's round can take dozens of paginated requests (see fetchSideTotal), and
+  // both sides get summed at once — fired with no pacing, that reliably bursts past whatever
+  // rate limit WarEra enforces (confirmed live: a 429 hit all five api*.warera.io hosts at once,
+  // including an unrelated feature's request). Routing every call through this queue keeps our
+  // own requests serialized with a floor between them, regardless of how many totals are being
+  // computed at once.
+  //
+  // On top of that fixed floor, a 429 also opens a backoff window that EVERY future call (not
+  // just the one that got rate-limited) waits out before sending anything — pacing alone still
+  // retries into the same limit if the server wants a longer break than REQUEST_SPACING_MS gives
+  // it. The window doubles on each consecutive 429 (capped) and resets once a request succeeds.
+  const BASE_BACKOFF_MS = 15_000;
+  const MAX_BACKOFF_MS = 120_000;
+  let backoffMs = BASE_BACKOFF_MS;
+  let rateLimitedUntil = 0;
+
+  function isRateLimited() {
+    return Date.now() < rateLimitedUntil;
+  }
+
+  function rateLimitSecondsLeft() {
+    return Math.max(0, Math.ceil((rateLimitedUntil - Date.now()) / 1000));
+  }
+
+  function isRateLimitError(err) {
+    return typeof err?.message === "string" && /\b429\b/.test(err.message);
+  }
+
+  let requestQueue = Promise.resolve();
+  function queuedApiCall(endpoint, params) {
+    const run = async () => {
+      const wait = rateLimitedUntil - Date.now();
+      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+      try {
+        const result = await browser.runtime.sendMessage({ type: "WARERA_OPS_FETCH", endpoint, params });
+        backoffMs = BASE_BACKOFF_MS; // healthy again — forget any prior escalation
+        return result;
+      } catch (err) {
+        if (isRateLimitError(err)) {
+          rateLimitedUntil = Date.now() + backoffMs;
+          backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
+          scheduleSync(); // let the tile show the rate-limited message right away
+        }
+        throw err;
+      }
+    };
+    const result = requestQueue.then(run, run);
+    requestQueue = result
+      .catch(() => {})
+      .then(() => new Promise((resolve) => setTimeout(resolve, REQUEST_SPACING_MS)));
+    return result;
+  }
   const MONEY_PATH_PREFIX = "M12 5C7.031 5 2 6.546 2 9.5S7.031 14"; // WarEra's "money" coin glyph
 
   function isBattlePage() {
@@ -42,6 +109,29 @@
       node = node.parentElement;
     }
     return node?.nextElementSibling || null;
+  }
+
+  // Which of the "Round #N" / "Battle" tabs is currently selected. There's no aria-selected (or
+  // any other state attribute) on these buttons — WarEra styles the active one with a distinct
+  // class combination from the others, who all share one identical classList with each other. So
+  // the active tab is whichever button's classList doesn't match any other button's; if that's
+  // not unambiguous (0 or 2+ candidates), don't guess — treat it as "no round selected".
+  function findActiveRoundTab() {
+    const buttons = Array.from(document.querySelectorAll("button")).filter((b) => {
+      const t = b.textContent.trim();
+      return /^Round #\d+$/.test(t) || t === "Battle";
+    });
+    if (buttons.length < 2) return null; // 1-round battles may show no tab bar at all
+
+    const classKey = (b) => Array.from(b.classList).sort().join(" ");
+    const keys = buttons.map(classKey);
+    const unique = buttons.filter((b, i) => keys.filter((k) => k === keys[i]).length === 1);
+    if (unique.length !== 1) return null;
+
+    const label = unique[0].textContent.trim();
+    if (label === "Battle") return { kind: "battle" };
+    const m = label.match(/^Round #(\d+)$/);
+    return m ? { kind: "round", roundNumber: Number(m[1]) } : null;
   }
 
   function findColumns(leaderboardContainer) {
@@ -114,59 +204,108 @@
     return `${Math.round(value * 1000) / 1000}`;
   }
 
-  // Sums `value` across every page of the ranking. If pagination stops working partway through
-  // (the endpoint's documented schema doesn't actually list "cursor" as an accepted param, so
-  // this is unverified against the live API), whatever was summed so far is kept and logged
-  // rather than treated as a hard failure.
-  async function fetchSideTotal(battleId, type, side) {
+  // Sums `value` across every page of the ranking. A failed page used to be swallowed — break out
+  // of the loop and return whatever partial sum had accumulated so far, as if that were the real
+  // total. That's actively wrong (a 429 on page 1 of 30 would report as "done" with a total that's
+  // ~97% too low, and nothing would ever retry it since the promise resolved normally). A failed
+  // page now propagates as a real rejection instead, so the caller's retry-with-cooldown logic
+  // actually gets a chance to run.
+  async function fetchSideTotal(battleId, roundId, type, side, selectionKey, onProgress) {
     let cursor;
     let total = 0;
     for (let page = 0; page < MAX_PAGES; page++) {
-      let payload;
-      try {
-        const params = { battleId, dataType: "money", type, side };
-        if (cursor) params.cursor = cursor;
-        const raw = await browser.runtime.sendMessage({
-          type: "WARERA_OPS_FETCH",
-          endpoint: "battleRanking.getRanking",
-          params,
-        });
-        payload = raw?.result?.data ?? raw;
-      } catch (err) {
-        console.error(
-          `[WarEra Ops] battleRanking.getRanking paging stopped early (battle ${battleId}, ${type}/${side}); total may be partial`,
-          err
-        );
-        break;
-      }
+      // The user has since switched to a different round/battle tab — this sweep's result is no
+      // longer wanted, so stop spending request budget (and rate-limit risk) on it.
+      if (selectionKey !== activeSelectionKey) throw ABORTED;
+
+      // battleId and roundId are mutually exclusive on this endpoint (confirmed against WarEra's
+      // own requests) — sending both returns zero results. limit:100 is the server's documented
+      // max (confirmed via a "too_big" validation error above it) — a big battle's round can have
+      // ~2800 entries, and without this the default ~20/page means ~140 requests just to sum one
+      // side of one round, which reliably triggers WarEra's rate limiting when both sides (or
+      // multiple rounds) are summed close together.
+      const params = roundId
+        ? { side, roundId, type, dataType: "money", limit: 100 }
+        : { battleId, dataType: "money", type, side, limit: 100 };
+      if (cursor) params.cursor = cursor;
+      const raw = await queuedApiCall("battleRanking.getRanking", params);
+      const payload = raw?.result?.data ?? raw;
 
       const items = payload?.items ?? [];
       for (const item of items) {
         if (typeof item.value === "number") total += item.value;
       }
+      // A round can take dozens of requests (and, if a 429 slips in, tens of seconds) to fully
+      // sum — surfacing the running total as it grows shows the tile is actively progressing
+      // rather than stuck, instead of leaving a bare "Loading…" up the whole time.
+      onProgress?.(total);
       if (!payload?.nextCursor || items.length === 0) break;
       cursor = payload.nextCursor;
     }
     return total;
   }
 
-  const cache = new Map(); // `${battleId}|${type}|${side}` -> { status, total }
+  const RETRY_COOLDOWN_MS = 5000; // don't hammer the API, but don't freeze on one bad fetch forever
 
-  function getSideTotal(battleId, type, side) {
-    const key = `${battleId}|${type}|${side}`;
+  const cache = new Map(); // `${battleId}|${roundId}|${type}|${side}` -> { status, total, retryAfter }
+
+  function getSideTotal(battleId, roundId, type, side) {
+    const key = `${battleId}|${roundId || "all"}|${type}|${side}`;
     let entry = cache.get(key);
-    if (!entry) {
-      entry = { status: "loading", total: null };
+    // A failed fetch used to stick around forever (no code path ever re-fetched it) — one transient
+    // hiccup would permanently freeze the tile at "Error"/stale-zero for the rest of the page's
+    // life. Retrying after a cooldown instead of never lets it self-heal. While a global rate-limit
+    // backoff is active, don't even try — that would just flip the tile to "Loading…" for a
+    // request that's actually parked in the queue, hiding the rate-limited countdown for no reason.
+    if (!entry || (entry.status === "error" && Date.now() > entry.retryAfter && !isRateLimited())) {
+      entry = { status: "loading", total: null, partial: 0, retryAfter: 0 };
       cache.set(key, entry);
-      fetchSideTotal(battleId, type, side)
+      fetchSideTotal(battleId, roundId, type, side, activeSelectionKey, (partial) => {
+        entry.partial = partial;
+        scheduleSync();
+      })
         .then((total) => {
           entry.status = "done";
           entry.total = total;
           scheduleSync();
         })
         .catch((err) => {
+          if (err === ABORTED) {
+            // Not a real failure — the user moved on before this finished. Drop the entry rather
+            // than marking it "error" (with a retry cooldown) or "done" (with a wrong number) —
+            // a later visit to this same tab just starts a clean sweep.
+            if (cache.get(key) === entry) cache.delete(key);
+            return;
+          }
           console.error("[WarEra Ops] failed to fetch battle money ranking", err);
           entry.status = "error";
+          entry.retryAfter = Date.now() + RETRY_COOLDOWN_MS;
+          scheduleSync();
+        });
+    }
+    return entry;
+  }
+
+  const battleRoundsCache = new Map(); // battleId -> { status, rounds: [id, ...] in round order }
+
+  // battle.getById's `rounds` array gives the round ObjectIds in order (rounds[0] = "Round #1",
+  // etc.) — nothing in the DOM exposes them, the tab buttons only show the human label.
+  function getBattleRounds(battleId) {
+    let entry = battleRoundsCache.get(battleId);
+    if (!entry || (entry.status === "error" && Date.now() > entry.retryAfter && !isRateLimited())) {
+      entry = { status: "loading", rounds: [], retryAfter: 0 };
+      battleRoundsCache.set(battleId, entry);
+      queuedApiCall("battle.getById", { battleId })
+        .then((raw) => {
+          const data = raw?.result?.data ?? raw;
+          entry.status = "done";
+          entry.rounds = Array.isArray(data?.rounds) ? data.rounds : [];
+          scheduleSync();
+        })
+        .catch((err) => {
+          console.error("[WarEra Ops] failed to fetch battle rounds", err);
+          entry.status = "error";
+          entry.retryAfter = Date.now() + RETRY_COOLDOWN_MS;
           scheduleSync();
         });
     }
@@ -181,15 +320,16 @@
     return holder?.parentElement?.querySelector("span.agd9b40") || null;
   }
 
-  function renderTileValue(tile, total, isError) {
+  function renderTileValue(tile, total, isError, partial) {
     const valueSpan = findMoneyValueSpan(tile);
     if (!valueSpan) return;
-    if (isError) valueSpan.textContent = "Error";
-    else if (total == null) valueSpan.textContent = "Loading…";
-    else valueSpan.textContent = formatMoney(total);
+    if (isError) valueSpan.textContent = isRateLimited() ? `Rate limited (${rateLimitSecondsLeft()}s)` : "Error";
+    else if (total == null) {
+      valueSpan.textContent = partial > 0 ? `Loading… (${formatMoney(partial)} so far)` : "Loading…";
+    } else valueSpan.textContent = formatMoney(total);
   }
 
-  function buildTotalTile(sampleRow, total, isError) {
+  function buildTotalTile(sampleRow, total, isError, partial) {
     const tile = sampleRow.cloneNode(true);
     tile.setAttribute(MARKER_ATTR, "true");
 
@@ -218,11 +358,11 @@
       }
     }
 
-    renderTileValue(tile, total, isError);
+    renderTileValue(tile, total, isError, partial);
     return tile;
   }
 
-  function syncColumn(columnEl, battleId, sides) {
+  function syncColumn(columnEl, battleId, roundId, sides) {
     const rowContainer = findRowContainer(columnEl);
     const existing = Array.from(rowContainer.children).find((c) => c.hasAttribute(MARKER_ATTR));
 
@@ -234,15 +374,28 @@
     const type = detectType(columnEl);
     if (!type) return;
 
-    const entries = sides.map((side) => getSideTotal(battleId, type, side));
+    const entries = sides.map((side) => getSideTotal(battleId, roundId, type, side));
     const anyError = entries.some((e) => e.status === "error");
     const allDone = entries.every((e) => e.status === "done");
     const total = allDone ? entries.reduce((sum, e) => sum + e.total, 0) : null;
+    // Sum whatever each side has accumulated so far — done sides contribute their final total,
+    // still-loading ones contribute their running partial — so the tile can show visible progress
+    // instead of a bare "Loading…" for however long a big round's pagination takes.
+    const partial = entries.reduce((sum, e) => sum + (e.status === "done" ? e.total : e.partial || 0), 0);
 
-    const displayKey = `${type}|${sides.join(",")}|${anyError ? "error" : total}`;
+    // The rate-limited countdown and the streaming partial total both need to force a re-render
+    // on every change, even though "still loading"/"still rate-limited" itself hasn't changed.
+    const statusKey = anyError
+      ? isRateLimited()
+        ? `wait${rateLimitSecondsLeft()}`
+        : "error"
+      : total != null
+        ? `done${total}`
+        : `loading${Math.round(partial)}`;
+    const displayKey = `${type}|${roundId || "all"}|${sides.join(",")}|${statusKey}`;
     if (existing) {
       if (existing.dataset.wiKey !== displayKey) {
-        renderTileValue(existing, total, anyError);
+        renderTileValue(existing, total, anyError, partial);
         existing.dataset.wiKey = displayKey;
       }
       return;
@@ -250,7 +403,7 @@
 
     const sampleRow = findSampleMoneyRow(rowContainer);
     if (!sampleRow) return;
-    const tile = buildTotalTile(sampleRow, total, anyError);
+    const tile = buildTotalTile(sampleRow, total, anyError, partial);
     tile.dataset.wiKey = displayKey;
     rowContainer.insertBefore(tile, rowContainer.firstElementChild);
   }
@@ -267,6 +420,15 @@
     const leaderboard = findLeaderboardContainer();
     if (!battleId || !leaderboard) return;
 
+    let roundId = null;
+    const activeTab = findActiveRoundTab();
+    if (activeTab?.kind === "round") {
+      const rounds = getBattleRounds(battleId);
+      if (rounds.status === "loading") return; // battle.getById not back yet — try again once it is
+      roundId = rounds.rounds[activeTab.roundNumber - 1] || null;
+    }
+    activeSelectionKey = `${battleId}|${roundId || "all"}`;
+
     const columns = findColumns(leaderboard);
     const headers = findHeaderLabels(leaderboard);
 
@@ -274,10 +436,10 @@
       columns.forEach((column, i) => {
         const label = headers[i];
         const side = label === "Attackers" ? "attacker" : label === "Defenders" ? "defender" : null;
-        syncColumn(column, battleId, side ? [side] : null);
+        syncColumn(column, battleId, roundId, side ? [side] : null);
       });
     } else if (columns.length === 1) {
-      syncColumn(columns[0], battleId, ["attacker", "defender"]);
+      syncColumn(columns[0], battleId, roundId, ["attacker", "defender"]);
     }
   }
 
@@ -314,8 +476,14 @@
         if (battleId !== lastBattleId) {
           lastBattleId = battleId;
           cache.clear();
+          battleRoundsCache.clear();
         }
         document.querySelectorAll(`[${MARKER_ATTR}]`).forEach((el) => el.remove());
+        scheduleSync();
+      } else if (isRateLimited()) {
+        // Nothing on the page needs to mutate for the countdown to tick down or for a retry to
+        // fire once the backoff window closes — nudge it explicitly instead of waiting on an
+        // unrelated DOM mutation to happen to trigger the observer.
         scheduleSync();
       }
     }, 800);
